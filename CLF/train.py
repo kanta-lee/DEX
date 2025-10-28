@@ -36,7 +36,7 @@ device = torch.device('cuda:' + str(args.gpu)
                       if torch.cuda.is_available() else 'cpu')
 
 # Just a file number
-exp_id = '0'
+exp_id = '1'
 
 # Assume that each time step is 0.1
 # Since the length of each trajectory is 50
