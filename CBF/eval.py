@@ -5,8 +5,9 @@ import torch
 from torchdiffeq import odeint
 from cbf import CBF
 
-tasks = ['NeedlePick-v0', 'GauzeRetrieve-v0',
-         'NeedleReach-v0', 'PegTransfer-v0', 'NeedleRegrasp-v0',]
+tasks = ['NeedlePick-v0', 'NeedlePick-v1', 'GauzeRetrieve-v0',
+         'NeedleReach-v0', 'PegTransfer-v0', 'NeedleRegrasp-v0',
+         'Hemipuncture-v0']
 
 parser = argparse.ArgumentParser('ODE demo')
 parser.add_argument('--method', type=str,
@@ -15,7 +16,7 @@ parser.add_argument('--task', type=str, choices=tasks, default='NeedlePick-v0')
 parser.add_argument('--data_size', type=int, default=50)
 parser.add_argument('--gpu', type=int, default=0)
 parser.add_argument('--use_dcbf', action='store_true')
-parser.add_argument('--exp_id', type=int, default=0)
+parser.add_argument('--id', type=int, default=0)
 
 args = parser.parse_args()
 
@@ -58,7 +59,7 @@ fc_param = [x_dim, 64, x_dim + x_dim * u_dim]
 # Initialize neural ODE
 func = CBF(fc_param).to(device)
 func.load_state_dict(torch.load(
-    f"saved_model/{args.task}/{args.exp_id}/CBF10.pth"))
+    f"saved_model/{args.task}/{args.id}/CBF10.pth"))
 func.eval()
 
 # Set up initial state
@@ -105,7 +106,8 @@ with torch.no_grad():
             )
         )
         
-        print(f"timestep{i:02d}, loss: {torch.sum((x0 - x_test[i + 1]) ** 2).item()}")
+        # print(f"timestep{i:02d}, loss: {torch.sum((x0 - x_test[i + 1]) ** 2).item()}")
+        print(f"timestep{i:02d}, loss: {torch.mean(torch.abs(x0 - x_test[i + 1])).item()}")
 
         # Compute the distance between robot and obstacle point
         barrier = (x0[0, 0] - 2.67054296) ** 2 \
@@ -113,6 +115,8 @@ with torch.no_grad():
             + (x0[0, 2] - 3.4671967) ** 2     \
             - 0.05 ** 2
         safety.append(barrier)
+        
+    print(f"total_loss: {torch.mean(torch.abs(pred_x - x_test))}")
 
 
 print("====== Safety ======")

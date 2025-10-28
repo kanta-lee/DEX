@@ -10,8 +10,11 @@ from cbf import CBF
 
 torch.autograd.set_detect_anomaly(True)
 
-tasks = ['NeedlePick-v0', 'GauzeRetrieve-v0',
-         'NeedleReach-v0', 'PegTransfer-v0', 'NeedleRegrasp-v0',]
+tasks = ['NeedlePick-v0', 'NeedlePick-v1', 'GauzeRetrieve-v0',
+         'NeedleReach-v0', 'PegTransfer-v0', 'NeedleRegrasp-v0',
+         'Hemipuncture-v0']
+
+# NOTE: For NeedlePick-v1, data_size = 100
 
 parser = argparse.ArgumentParser('ODE demo')
 parser.add_argument('--method', type=str,
@@ -26,6 +29,7 @@ parser.add_argument('--batch_size', type=int, default=20)
 parser.add_argument('--niters', type=int, default=200)  # 2000
 parser.add_argument('--test_freq', type=int, default=20)  # 2 20
 parser.add_argument('--gpu', type=int, default=0)
+parser.add_argument('--id', type=int, default=0)
 
 
 args = parser.parse_args()
@@ -39,7 +43,9 @@ device = torch.device('cuda:' + str(args.gpu)
 # Assume that each time step is 0.1
 # Since the length of each trajectory is 50
 # So we need a time vector that has size of 50 with each element differs by 0.1
-t = torch.linspace(0., 4.9, args.data_size).to(device)
+t = torch.arange(args.data_size) * 0.1
+t = t.to(device)
+# t = torch.linspace(0., 4.9, args.data_size).to(device)
 
 # Load dataset
 obs = np.load(f'../Data/{args.task}/obs_pos.npy')  # [100, 51, 19]
@@ -141,7 +147,7 @@ def makedirs(dirname):
         os.makedirs(dirname)
     else:
         print("Directory existed! Please recheck!")
-        print("If you want to retrain, please increment exp_id variable")
+        print("If you want to retrain, please increment id variable")
         exit(0)
 
 
@@ -167,11 +173,9 @@ class RunningAverageMeter(object):
 if __name__ == '__main__':
 
     test_count = 0
-    # Just a file number
-    exp_id = '0'
 
     # Create directory to store trained weights
-    saved_folder = f'saved_model/{args.task}/{exp_id}'
+    saved_folder = f'saved_model/{args.task}/{args.id}'
     makedirs(saved_folder)
 
     # Set up the dimension of the network
