@@ -26,9 +26,9 @@ parser = argparse.ArgumentParser('Data Processing')
 parser.add_argument(
     '--task',
     type=str,
-    choices=['NeedlePick-v0', 'GauzeRetrieve-v0',
+    choices=['NeedlePick-v0', 'GauzeRetrieve-v0', 'GauzeRetrieve-v1',
              'NeedleReach-v0', 'PegTransfer-v0',
-             'NeedleRegrasp-v0'],
+             'NeedleRegrasp-v0', 'NeedlePick-v1', 'Hemipuncture-v0'],
     default='NeedlePick-v0'
 )
 args = parser.parse_args()
@@ -52,7 +52,7 @@ data = np.load(
 ECM = 0
 SINGLE_PSM = 1
 BI_PSM = 2
-if args.task in ['NeedlePick-v0','GauzeRetrieve-v0', 'NeedleReach-v0', 'PegTransfer-v0']:
+if args.task in ['NeedlePick-v0', 'NeedlePick-v1', 'GauzeRetrieve-v0', 'GauzeRetrieve-v1', 'NeedleReach-v0', 'PegTransfer-v0']:
     domain = SINGLE_PSM
 elif args.task in ['NeedleRegrasp-v0']:
     domain = BI_PSM
@@ -96,32 +96,55 @@ obs[32:35]: Waypoint Orientation of PSM1
 #       Single PSM tasks with self.has_object=False have observation of shape 7
 #       Action shape remains the same for all single PSM tasks.
 
+num_ep = data['obs'].shape[0]
+assert num_ep == data['acs'].shape[0]
+
+timestep_per_ep = data['obs'].shape[1]
+assert timestep_per_ep == data['acs'].shape[1] + 1
+
 
 if domain == SINGLE_PSM:
     # Initialize arrays
-    obs_pos = np.zeros((100, 51, 3))
-    obs_orn = np.zeros((100, 51, 4))  # jaw angle included
+    obs_pos = np.zeros((num_ep, timestep_per_ep, 3))
+    obs_orn = np.zeros((num_ep, timestep_per_ep, 4))  # jaw angle included
     acs_pos = data['acs'][:, :, 0:3]
     acs_orn = data['acs'][:, :, 3:5]  # d_yaw, jaw open / close
     
     # Get observation data
-    for i in range(100):
-        for j in range(51):
+    for i in range(num_ep):
+        print(f"Episode {i}")
+        for j in range(timestep_per_ep):
             obs_pos[i, j, :] = data['obs'][i][j]['observation'][0:3]
             obs_orn[i, j, :] = data['obs'][i][j]['observation'][3:7]
 elif domain == BI_PSM:
-    obs_pos = np.zeros((100, 51, 3+3))
-    obs_orn = np.zeros((100, 51, 3+3))  # jaw angle NOT included
+    obs_pos = np.zeros((num_ep, timestep_per_ep, 3+3))
+    obs_orn = np.zeros((num_ep, timestep_per_ep, 3+3))  # jaw angle NOT included
     acs_pos = data['acs'][:, :, [0, 1, 2, 5, 6, 7]]
     acs_orn = data['acs'][:, :, [3, 8]]  # d_yaw
 
-    for i in range(100):
-        for j in range(51):
+    for i in range(num_ep):
+        print(f"Episode {i}")
+        for j in range(timestep_per_ep):
             obs_pos[i, j, :] = data['obs'][i][j]['observation'][[0, 1, 2, 7, 8, 9]]
             obs_orn[i, j, :] = data['obs'][i][j]['observation'][[3, 4, 5, 10, 11, 12]]
+elif args.task == "Hemipuncture-v0":
+    # NOTE: Position of tool_pitch is included.
+    obs_pos = np.zeros((num_ep, timestep_per_ep, 6))
+    acs_pos = data['acs'][:, :, 0:3]
+    
+    # Get observation data
+    for i in range(num_ep):
+        print(f"Episode {i}")
+        for j in range(timestep_per_ep):
+            obs_pos[i, j, :] = data['obs'][i][j]['observation'][[0, 1, 2, 7, 8, 9]]
+
 
 # Save to npy files
-np.save(f'{args.task}/obs_pos.npy', obs_pos)
-np.save(f'{args.task}/obs_orn.npy', obs_orn)
-np.save(f'{args.task}/acs_pos.npy', acs_pos)
-np.save(f'{args.task}/acs_orn.npy', acs_orn)
+if args.task == "Hemipuncture-v0":
+    np.save(f'{args.task}/obs_pos.npy', obs_pos)
+    np.save(f'{args.task}/acs_pos.npy', acs_pos)
+else:
+    np.save(f'{args.task}/obs_pos.npy', obs_pos)
+    np.save(f'{args.task}/obs_orn.npy', obs_orn)
+    np.save(f'{args.task}/acs_pos.npy', acs_pos)
+    np.save(f'{args.task}/acs_orn.npy', acs_orn)
