@@ -1,0 +1,5 @@
+#oarsub -p "host in ('byt4090i0','byt4090i1','byt5880i0','byta6000i0')" -l host=1/gpuset=1/cpu=1,walltime=168:00:00 "bash /bd_targaryen/users/kleelakunwet/DEX/task.sh NeedlePick-v0 1"
+oarsub -p "host in ('byt4090i0','byt4090i1','byta6000i0')" -l host=1/gpuset=1/cpu=1,walltime=168:00:00 "bash /bd_targaryen/users/kleelakunwet/DEX/task.sh NeedlePick-v2 1"
+#oarsub -p "host in ('byt4090i0','byt4090i1','byt5880i0','byta6000i0')" -l host=1/gpuset=1/cpu=1,walltime=168:00:00 "bash /bd_targaryen/users/kleelakunwet/DEX/task.sh NeedlePick-v1 1"
+#oarsub -p "host in ('byta6000i0')" -l host=1/gpuset=1/cpu=1,walltime=168:00:00 "bash /bd_targaryen/users/kleelakunwet/DEX/task.sh GauzeRetrieve-v1 1"
+#oarsub -p "host in ('byt4090i0','byt4090i1','byt5880i0','byta6000i0')" -l host=1/gpuset=1/cpu=1,walltime=168:00:00 "bash /bd_targaryen/users/kleelakunwet/DEX/task.sh GauzeRetrieve-v2 1"
