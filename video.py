@@ -1,6 +1,7 @@
-import cv2
 import os
+import cv2
 import sys
+import argparse
 from natsort import natsorted
 
 
@@ -38,21 +39,47 @@ def create_video_from_images(image_folder, video_name, fps=30):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python video.py task episode")
-        #                       [0]   [1]    [2]
-        exit(0)
-    task = sys.argv[1]
-    episode = sys.argv[2]
+    ALLOWED_TASKS = ['NeedlePick-v1', 'NeedlePick-v2', 'GauzeRetrieve-v1', 'GauzeRetrieve-v2']
+    parser = argparse.ArgumentParser(description='Create video from evaluation images')
+    parser.add_argument('task', type=str, choices=ALLOWED_TASKS, help='Task name (e.g., NeedlePick-v2)')
+    parser.add_argument('--episode', type=int, choices=range(0, 20), default=0, help='Episode number')
+    parser.add_argument('--seed', type=int, choices=[1, 2, 3], default=1, help='Seed value')
+    parser.add_argument('--cbf', action='store_true', help='Process CBF instead of NONE')
+    
+    args = parser.parse_args()
+    
     fps = 10  # Frames per second
-    image_folder = f'./saved_eval_pic/NONE/{task}/{episode}/'
-    video_name = image_folder + task + ".mp4" # 'output_video.mp4'  # Desired output video name
+    
+    # Convert episode to two-digit format
+    episode_str = f"{args.episode:02d}"
+    
+    if args.cbf:
+        # Process CBF
+        image_folder = f'./saved_eval_pic/CBF/{args.task}/s{args.seed}/{episode_str}/'
+        video_name = image_folder + args.task + "-CBF.mp4"
+    else:
+        # Process NONE
+        image_folder = f'./saved_eval_pic/NONE/{args.task}/s{args.seed}/{episode_str}/'
+        video_name = image_folder + args.task + ".mp4"
+    
     create_video_from_images(image_folder, video_name, fps)
     
-    CBF_image_folder = f'./saved_eval_pic/CBF/{task}/{episode}/'
-    CBF_video_name = CBF_image_folder + task + "-CBF.mp4" # 'output_video.mp4'  # Desired output video name
-    create_video_from_images(CBF_image_folder, CBF_video_name, fps)
+# if __name__ == "__main__":
+#     if len(sys.argv) != 3:
+#         print("Usage: python video.py task episode")
+#         #                       [0]   [1]    [2]
+#         exit(0)
+#     task = sys.argv[1]
+#     episode = sys.argv[2]
+#     fps = 10  # Frames per second
+#     image_folder = f'./saved_eval_pic/NONE/{task}/{episode}/'
+#     video_name = image_folder + task + ".mp4" # 'output_video.mp4'  # Desired output video name
+#     create_video_from_images(image_folder, video_name, fps)
     
-    CLF_image_folder = f'./saved_eval_pic/CLF/{task}/{episode}/'
-    CLF_video_name = CLF_image_folder + task + "-CLF.mp4" # 'output_video.mp4'  # Desired output video name
-    create_video_from_images(CLF_image_folder, CLF_video_name, fps)
+#     CBF_image_folder = f'./saved_eval_pic/CBF/{task}/{episode}/'
+#     CBF_video_name = CBF_image_folder + task + "-CBF.mp4" # 'output_video.mp4'  # Desired output video name
+#     create_video_from_images(CBF_image_folder, CBF_video_name, fps)
+    
+#     CLF_image_folder = f'./saved_eval_pic/CLF/{task}/{episode}/'
+#     CLF_video_name = CLF_image_folder + task + "-CLF.mp4" # 'output_video.mp4'  # Desired output video name
+#     create_video_from_images(CLF_image_folder, CLF_video_name, fps)
