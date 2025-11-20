@@ -44,3 +44,6 @@ train: True
 max_episode_steps: 100
 use_dcbf: False
 use_dclf: False
+
+view_type: front
+render_three_views: False

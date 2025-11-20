@@ -79,7 +79,11 @@ saved_eval_pic/
 
 ## Datasets
 Data/
-!Data/data_processing.py
 
 log/
 video/
+
+## NeuralODE's weight
+NeuralODE/weights
+NeuralODE/data
+NeuralODE/OAR.*

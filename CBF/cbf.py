@@ -1,34 +1,15 @@
 import numpy as np
-
 import torch
-import torch.nn as nn
+from cvxopt import solvers
+from cvxopt.base import matrix
 
-from cvxopt import solvers, matrix
-from math import sqrt, cos, sin, acos
-from scipy.spatial.transform import Rotation
-
-# # Load dataset
-# obs = np.load('./data/obs3.npy')  # [100, 51, 19]
-# obs = torch.tensor(obs).float()
-# SCALING = 5.0
-# acs = np.load('./data/acs3.npy')  # [100, 50 ,5]
-# acs = acs * 0.01 * SCALING  # [100, 50, 3]
-# acs = torch.tensor(acs).float()
-
-# # Training data
-# x_train = obs.unsqueeze(2).to(device)  # [100, 51, 1, 3]
-# u_train = acs.unsqueeze(2).to(device)  # [100, 50, 1, 3]
-
-# # Testing data
-# x_test = x_train[-1, :, :, :]  # [51, 1, 3]
-# u_test = u_train[-1, :, :, :]  # [50, 1, 3]
-
-# # Initial condition for testing
-# x_test0 = x_train[-1, 0, :, :]  # [1, 3]
-# u_test0 = u_train[-1, 0, :, :]  # [1, 3]
+from surrol.tasks.gauze_retrieve_sphere import GauzeRetrieveSphere
+from surrol.tasks.needle_pick_sphere import NeedlePickSphere
+from surrol.tasks.gauze_retrieve_liver import GauzeRetrieveCylinder
+from surrol.tasks.needle_pick_liver import NeedlePickCylinder
 
 
-def cvx_solver(P, q, G, h):
+def qp_solver(P, q, G, h):
     mat_P = matrix(P.cpu().numpy())
     mat_q = matrix(q.cpu().numpy())
     mat_G = matrix(G.cpu().numpy())
@@ -38,526 +19,264 @@ def cvx_solver(P, q, G, h):
 
     sol = solvers.qp(mat_P, mat_q, mat_G, mat_h)
 
-    return sol['x']
+    return np.array(sol['x']).flatten()
 
 
-class CBF(nn.Module):
+class CBF():
+    def __init__(self, net: torch.nn.Module, device: torch.device):
+        self.net = net
+        self.device = device
+        self.x_dim = 3
+        self.u_dim = 3
 
-    def __init__(self, fc_param):
-        super(CBF, self).__init__()
+    @torch.no_grad()
+    def needle_pick_sphere(
+        self,
+        u: torch.Tensor,
+        env: NeedlePickSphere,
+    ) -> torch.Tensor:
+        psm_pos = env._get_robot_state(0)[:3]
+        center, radius = env.get_sphere_prop()
+        
+        psm_pos = torch.from_numpy(psm_pos).float().unsqueeze(0).to(self.device)
+        center = torch.from_numpy(center).float().unsqueeze(0).to(self.device)
+        
+        with torch.enable_grad():
+            psm_pos.requires_grad_(True)
+            b = torch.sum((psm_pos - center) ** 2) - radius ** 2
+            b.backward()
+            grad_b = psm_pos.grad.detach()
+        
+        # Reset requires_grad to False before using psm_pos further
+        psm_pos.requires_grad_(False)
+        
+        # Obtain the dynamics
+        net_out = self.net(psm_pos)  # [1, 12]
+        fx = net_out[:, :self.x_dim]  # [1, 3]
+        gx = net_out[:, self.x_dim:]  # [1, 9]
+        gx = torch.reshape(gx, (self.u_dim, self.x_dim))
+        
+        # Compute Lie derivative
+        Lfb = grad_b @ fx.T  # [1, 1]
+        Lgb = grad_b @ gx.T  # [1, 9]
+        
+        gamma = 1
+        G = -Lgb.to(self.device)
+        h = (Lfb + gamma * b).to(self.device)
+        P = torch.eye(self.u_dim).to(self.device)
+        q = -u.T
 
-        self.net = self.build_mlp(fc_param)
-        self.x_dim = fc_param[0]
-        self.u_dim = (fc_param[-1] - fc_param[0]) // fc_param[0]
-
-        # Initializing weights
-        for m in self.net.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, mean=0, std=0.1)
-                nn.init.constant_(m.bias, val=0)
-
-        self.u = None
-        self.device = torch.device(
-            'cuda:' + str(0)
-            if torch.cuda.is_available() else 'cpu'
-        )
-
-        # constraint
-        # val = 5 * URDF's val
-
-    def forward(self, t, x):
-        # x.shape = [20, 1, 3]
-        if self.training:
-
-            net_out = self.net(x)  # [20, 1, 12]
-
-            # \dot{x} = f(x) + g(x) * u
-            fx = net_out[:, :, :self.x_dim]
-            gx = net_out[:, :, self.x_dim:]
-
-            g_chunks = torch.chunk(gx, self.u_dim, dim=-1)
-
-            u = self.u  # [20, 1, 3]
+        modified_u = qp_solver(P.double(), q.double(), G.double(), h.double())
+        modified_u = torch.from_numpy(modified_u).float().to(self.device).reshape(1, -1)
+        return modified_u
+    
+    @torch.no_grad()
+    def needle_pick_cylinder(
+        self,
+        u: torch.Tensor,
+        env: NeedlePickCylinder,
+    ) -> torch.Tensor:
+        psm_pos = env._get_robot_state(0)[:3]
+        cyl_center, cyl_axis, cyl_length, cyl_radius = env.get_cylinder_prop()
+        
+        # Convert to torch tensor
+        psm_pos = torch.from_numpy(psm_pos).float().unsqueeze(0).to(self.device)
+        cyl_center = torch.from_numpy(cyl_center).float().unsqueeze(0).to(self.device)
+        cyl_axis = torch.from_numpy(-cyl_axis).float().unsqueeze(0).to(self.device)
+        
+        with torch.enable_grad():
+            psm_pos.requires_grad_(True)
             
-            out = torch.cat([
-                (g * u).sum(axis=2).unsqueeze(2) for g in g_chunks
-            ], dim=2) + fx  # [20, 1, 3]
+            # --- 1. Define Cylinder Top Plane ---
+            # We define the top plane by a point on it (cyl_top_center)
+            # and its normal vector (cyl_axis).
+            cyl_top_center = cyl_center + cyl_length * cyl_axis
 
-        else:
-            # For test and evaluation
-
-            net_out = self.net(x)  # [1, 12]
-
-            # \dot{x} = f(x) + g(x) * u
-            fx = net_out[:, :self.x_dim]  # [1, 3]
-            gx = net_out[:, self.x_dim:]  # [1, 9]
-
-            Gx = torch.reshape(gx, (self.u_dim, self.x_dim))
-
-            # g_chunks = torch.chunk(gx, self.u_dim, dim=-1)
-            # out = torch.cat([
-            #     (g * self.u).sum(axis=1).unsqueeze(1) for g in g_chunks
-            # ], dim=1) + fx  # [1, 3]
+            # --- 2. Calculate Vertical Barrier (b_vertical) ---
+            # This is the signed linear distance from psm_pos to the top plane.
+            # We calculate this using the dot product, as defined in the paper.
+            # b_vertical > 0 if psm is "above" the plane (in the direction of cyl_axis)
+            # b_vertical < 0 if psm is "below" the plane (unsafe region)
+            vec_to_top = psm_pos - cyl_top_center
             
-            out = fx + self.u @ Gx.T
+            # Use .squeeze() to make the tensors 1D (shape [3]) for torch.dot
+            b_vertical = torch.dot(vec_to_top.squeeze(), cyl_axis.squeeze())
 
-        return out
+            # --- 3. Calculate Radial Barrier (b_radial) ---
+            # This is the squared perpendicular distance from psm_pos to the axis,
+            # minus the squared radius.
+            # b_radial > 0 if psm is outside the radius.
+            # b_radial < 0 if psm is inside the radius (unsafe region).
+            vec_from_axis_point = psm_pos - cyl_center
+            radial_dist_sq = torch.linalg.cross(vec_from_axis_point, cyl_axis).norm().pow(2)
+            b_radial = radial_dist_sq - cyl_radius ** 2
 
-    def build_discretized_center_line(self, cylinder_length, radius, center, cylinder_ori):
-        rot_matrix = Rotation.from_quat(np.array(cylinder_ori)).as_matrix()
+            # --- 4. Combine Barriers with torch.max ---
+            # The robot is safe if EITHER b_vertical >= 0 OR b_radial >= 0.
+            # torch.max() implements this "OR" logic differentiably.
+            # b will only be negative if *both* are negative (inside radius AND below top).
+            b = torch.max(b_vertical, b_radial)
 
-        # discretize the center line
-        all_point = []
-        num = 100
-        for i in range(num):
-            ori_xyz = np.array([0, -radius, radius + i / num * cylinder_length]).reshape(3, 1)
-            all_point.append((rot_matrix@ori_xyz).reshape(-1)+np.array(center))
-        for i in range(num):
-            theta = i / num * (np.pi/2)
-            ori_xyz = np.array([0, -radius*sin(theta), radius*(1-cos(theta))]).reshape(3, 1)
-            all_point.append((rot_matrix @ ori_xyz).reshape(-1)+np.array(center))
-        for i in range(num):
-            theta = i / num * (np.pi/2)
-            ori_xyz = np.array([0, radius*sin(theta), radius*(cos(theta)-1)]).reshape(3, 1)
-            all_point.append((rot_matrix @ ori_xyz).reshape(-1)+np.array(center))
-        for i in range(num):
-            ori_xyz = np.array([0, radius, -radius - i / num * cylinder_length]).reshape(3, 1)
-            all_point.append((rot_matrix @ ori_xyz).reshape(-1)+np.array(center))
-        # 400, 3
-        self.all_point = np.stack(all_point, axis=0)
+            # --- 5. Compute Gradient ---
+            # Backpropagate from the final combined barrier 'b'.
+            # PyTorch automatically routes the gradient through the
+            # correct function (b_vertical or b_radial) that was the max.
+            if b.grad_fn:
+                # Clear old gradients before backward pass
+                if psm_pos.grad is not None:
+                    psm_pos.grad.zero_()
+                    
+                b.backward()
+                grad_b = psm_pos.grad.detach()
+            else:
+                # Handle case where b is not part of a graph (e.g., inputs don't require grad)
+                grad_b = torch.zeros_like(psm_pos)
+        
+        # Reset requires_grad to False before using psm_pos further
+        psm_pos.requires_grad_(False)
 
-    def constraint_valid(self, constraint_type, robot,
-                         constraint_center=None, length=None,
-                         point=None, normal_vector=None, radius=None, ori_vector=None):
-        # Assign robot state
-        x, y, z = robot[0], robot[1], robot[2]
-
-        if constraint_type == 1:
-            x0, y0, z0 = constraint_center
-            b = (x - x0) ** 2 + (y - y0) ** 2 + (z - z0) ** 2 - radius ** 2
-            violate = (b <= 0)
-        elif constraint_type == 2:
-            x0, y0, z0 = point
-            a0, b0, c0 = normal_vector
-            norm_score = sqrt(a0 ** 2 + b0 ** 2 + c0 ** 2)
-            a0, b0, c0 = a0 / norm_score, b0 / norm_score, c0 / norm_score
-            b = (a0 * (x - x0) + b0 * (y - y0) + c0 * (z - z0)) ** 2 - length ** 2
-            violate = (b <= 0)
-        elif constraint_type == 3:
-            x0, y0, z0 = constraint_center
-            b = (x - x0) ** 2 + (y - y0) ** 2 - radius ** 2
-            violate = (b <= 0)
-        elif constraint_type == 4:
-            x0, y0, z0 = constraint_center
-            b = (x - x0) ** 2 + (y - y0) ** 2 + (z - z0) ** 2 - radius ** 2
-            violate = (b > 0)
-        elif constraint_type == 5:
-            proj_vec = np.dot(np.array(ori_vector), np.array(robot)-np.array(constraint_center))*np.array(ori_vector)
-            norm_vec = np.array(robot)-(np.array(constraint_center)+proj_vec)
-            violate = (np.sum(norm_vec**2)-radius**2 > 0)
-        elif constraint_type == 6:
-            dis = np.sum((self.all_point-np.array(robot))**2, axis=-1)
-            min_dis_ind = np.argmin(dis)
-            norm_vec = np.array(robot)-self.all_point[min_dis_ind]
-            violate = (np.sum(norm_vec**2)-radius**2 > 0)
-        return violate
-
-    def dCBF_sphere(self, robot, u, f, g1, g2, g3, constraint_center, radius):
-        """Enforce CBF on action
-
-        Args:
-            robot  ([1, 3]): robot state
-            u  ([1, 3]): action
-            f  ([1, 3]): fx
-            g1 ([1, 3]): first row of gx
-            g2 ([1, 3]): second row of gx
-            g3 ([1, 3]): third row of gx
-        """
-        # Assign robot state
-        x, y, z = robot[0, 0], robot[0, 1], robot[0, 2]
-
-        # Obstacle point position
-        # x0, y0, z0 = 2.66255212, -0.00543937, 3.49126458
-        x0, y0, z0 = constraint_center
-
-        r = radius
-
-        # Compute barrier function
-        b = (x - x0) ** 2 + (y - y0) ** 2 + (z - z0) ** 2 - r ** 2
-
-        Lfb = 2 * (x - x0) * f[0, 0] \
-            + 2 * (y - y0) * f[0, 1] \
-            + 2 * (z - z0) * f[0, 2]
-
-        Lgb = 2 * (x - x0) * g1 \
-            + 2 * (y - y0) * g2 \
-            + 2 * (z - z0) * g3
-
+        # Obtain the dynamics
+        net_out = self.net(psm_pos)  # [1, 12]
+        fx = net_out[:, :self.x_dim]  # [1, 3]
+        gx = net_out[:, self.x_dim:]  # [1, 9]
+        gx = torch.reshape(gx, (self.u_dim, self.x_dim))
+        
+        # Compute Lie derivative
+        Lfb = grad_b @ fx.T  # [1, 1]
+        Lgb = grad_b @ gx.T  # [1, 9]
+        
         gamma = 1
-        b_safe = Lfb + gamma * b
-        A_safe = -Lgb
+        G = -Lgb.to(self.device)
+        h = (Lfb + gamma * b).to(self.device)
+        P = torch.eye(self.u_dim).to(self.device)
+        q = -u.T
 
-        dim = g1.shape[1]  # = 3
-        G = A_safe.to(self.device)
-        h = b_safe.unsqueeze(0).to(self.device)  # [1, 1]
-        P = torch.eye(dim).to(self.device)  # [3, 3]
-        q = -u.T  # [3, 1]
-
-        # NOTE: different x from above now
-        x = cvx_solver(P.double(), q.double(), G.double(), h.double())
-
-        out = []
-        for i in range(dim):
-            out.append(x[i])
-        out = np.array(out)
-        out = torch.tensor(out).float().to(self.device)
-        out = out.unsqueeze(0)
-        return out
-
-    def dCBF_surface(self, robot, u, f, g1, g2, g3, point, normal_vector, length):
-        """Enforce CBF on action
-
-        Args:
-            robot  ([1, 3]): robot state
-            u  ([1, 3]): action
-            f  ([1, 3]): fx
-            g1 ([1, 3]): first row of gx
-            g2 ([1, 3]): second row of gx
-            g3 ([1, 3]): third row of gx
-        """
-        # Assign robot state
-        x, y, z = robot[0, 0], robot[0, 1], robot[0, 2]
-
-        # Obstacle is a surface defined by a point on the surface and the normal vector
-        x0, y0, z0 = point
-        a0, b0, c0 = normal_vector
-        norm_score = sqrt(a0**2+b0**2+c0**2)
-        a0, b0, c0 = a0/norm_score, b0/norm_score, c0/norm_score
-
-        d = length
-
-        # Compute barrier function
-        b = (a0 * (x - x0) + b0 * (y - y0) + c0 * (z - z0)) ** 2 - d ** 2
-
-        Lfb = 2 * a0 * (a0 * (x - x0) + b0 * (y - y0) + c0 * (z - z0)) * f[0, 0] \
-            + 2 * b0 * (a0 * (x - x0) + b0 * (y - y0) + c0 * (z - z0)) * f[0, 1] \
-            + 2 * c0 * (a0 * (x - x0) + b0 * (y - y0) + c0 * (z - z0)) * f[0, 2]
-
-        Lgb = 2 * a0 * (a0 * (x - x0) + b0 * (y - y0) + c0 * (z - z0)) * g1 \
-            + 2 * b0 * (a0 * (x - x0) + b0 * (y - y0) + c0 * (z - z0)) * g2 \
-            + 2 * c0 * (a0 * (x - x0) + b0 * (y - y0) + c0 * (z - z0)) * g3
-
+        modified_u = qp_solver(P.double(), q.double(), G.double(), h.double())
+        modified_u = torch.from_numpy(modified_u).float().to(self.device).reshape(1, -1)
+        return modified_u
+    
+    @torch.no_grad()
+    def gauze_retrieve_sphere(
+        self,
+        u: torch.Tensor,
+        env: GauzeRetrieveSphere,
+    ) -> torch.Tensor:
+        psm_pos = env._get_robot_state(0)[:3]
+        center, radius = env.get_sphere_prop()
+        
+        psm_pos = torch.from_numpy(psm_pos).float().unsqueeze(0).to(self.device)
+        center = torch.from_numpy(center).float().unsqueeze(0).to(self.device)
+        
+        with torch.enable_grad():
+            psm_pos.requires_grad_(True)
+            b = torch.sum((psm_pos - center) ** 2) - radius ** 2
+            b.backward()
+            grad_b = psm_pos.grad.detach()
+        
+        # Reset requires_grad to False before using psm_pos further
+        psm_pos.requires_grad_(False)
+        
+        # Obtain the dynamics
+        net_out = self.net(psm_pos)  # [1, 12]
+        fx = net_out[:, :self.x_dim]  # [1, 3]
+        gx = net_out[:, self.x_dim:]  # [1, 9]
+        gx = torch.reshape(gx, (self.u_dim, self.x_dim))
+        
+        # Compute Lie derivative
+        Lfb = grad_b @ fx.T  # [1, 1]
+        Lgb = grad_b @ gx.T  # [1, 9]
+        
         gamma = 1
-        b_safe = Lfb + gamma * b
-        A_safe = -Lgb
+        G = -Lgb.to(self.device)
+        h = (Lfb + gamma * b).to(self.device)
+        P = torch.eye(self.u_dim).to(self.device)
+        q = -u.T
 
-        dim = g1.shape[1]  # = 3
-        G = A_safe.to(self.device)
-        h = b_safe.unsqueeze(0).to(self.device)  # [1, 1]
-        P = torch.eye(dim).to(self.device)  # [3, 3]
-        q = -u.T  # [3, 1]
+        modified_u = qp_solver(P.double(), q.double(), G.double(), h.double())
+        modified_u = torch.from_numpy(modified_u).float().to(self.device).reshape(1, -1)
+        return modified_u
+        
+    @torch.no_grad()
+    def gauze_retrieve_cylinder(
+        self,
+        u: torch.Tensor,
+        env: GauzeRetrieveCylinder,
+    ) -> torch.Tensor:
+        psm_pos = env._get_robot_state(0)[:3]
+        cyl_center, cyl_axis, cyl_length, cyl_radius = env.get_cylinder_prop()
+        
+        # Convert to torch tensor
+        psm_pos = torch.from_numpy(psm_pos).float().unsqueeze(0).to(self.device)
+        cyl_center = torch.from_numpy(cyl_center).float().unsqueeze(0).to(self.device)
+        cyl_axis = torch.from_numpy(-cyl_axis).float().unsqueeze(0).to(self.device)
+        
+        with torch.enable_grad():
+            psm_pos.requires_grad_(True)
+            
+            # --- 1. Define Cylinder Top Plane ---
+            # We define the top plane by a point on it (cyl_top_center)
+            # and its normal vector (cyl_axis).
+            cyl_top_center = cyl_center + cyl_length * cyl_axis
 
-        # NOTE: different x from above now
-        x = cvx_solver(P.double(), q.double(), G.double(), h.double())
+            # --- 2. Calculate Vertical Barrier (b_vertical) ---
+            # This is the signed linear distance from psm_pos to the top plane.
+            # We calculate this using the dot product, as defined in the paper.
+            # b_vertical > 0 if psm is "above" the plane (in the direction of cyl_axis)
+            # b_vertical < 0 if psm is "below" the plane (unsafe region)
+            vec_to_top = psm_pos - cyl_top_center
+            
+            # Use .squeeze() to make the tensors 1D (shape [3]) for torch.dot
+            b_vertical = torch.dot(vec_to_top.squeeze(), cyl_axis.squeeze())
 
-        out = []
-        for i in range(dim):
-            out.append(x[i])
-        out = np.array(out)
-        out = torch.tensor(out).float().to(self.device)
-        out = out.unsqueeze(0)
-        return out
+            # --- 3. Calculate Radial Barrier (b_radial) ---
+            # This is the squared perpendicular distance from psm_pos to the axis,
+            # minus the squared radius.
+            # b_radial > 0 if psm is outside the radius.
+            # b_radial < 0 if psm is inside the radius (unsafe region).
+            vec_from_axis_point = psm_pos - cyl_center
+            radial_dist_sq = torch.linalg.cross(vec_from_axis_point, cyl_axis).norm().pow(2)
+            b_radial = radial_dist_sq - cyl_radius ** 2
 
-    def dCBF_plate(self, robot, u, f, g1, g2, g3, plate_center, radius, length, current_area):
-        """Enforce CBF on action
+            # --- 4. Combine Barriers with torch.max ---
+            # The robot is safe if EITHER b_vertical >= 0 OR b_radial >= 0.
+            # torch.max() implements this "OR" logic differentiably.
+            # b will only be negative if *both* are negative (inside radius AND below top).
+            b = torch.max(b_vertical, b_radial)
 
-        Args:
-            robot  ([1, 3]): robot state
-            u  ([1, 3]): action
-            f  ([1, 3]): fx
-            g1 ([1, 3]): first row of gx
-            g2 ([1, 3]): second row of gx
-            g3 ([1, 3]): third row of gx
-        """
-        # Assign robot state
-        x, y, z = robot[0, 0], robot[0, 1], robot[0, 2]
+            # --- 5. Compute Gradient ---
+            # Backpropagate from the final combined barrier 'b'.
+            # PyTorch automatically routes the gradient through the
+            # correct function (b_vertical or b_radial) that was the max.
+            if b.grad_fn:
+                # Clear old gradients before backward pass
+                if psm_pos.grad is not None:
+                    psm_pos.grad.zero_()
+                    
+                b.backward()
+                grad_b = psm_pos.grad.detach()
+            else:
+                # Handle case where b is not part of a graph (e.g., inputs don't require grad)
+                grad_b = torch.zeros_like(psm_pos)
 
-        # box center
-        x0, y0, z0 = plate_center
-
-        r = radius
-        d = length
-
-        # Compute barrier function
-        if current_area == 1:
-            b = (x - x0) ** 2 + (y - y0) ** 2 - r ** 2
-
-            Lfb = 2 * (x - x0) * f[0, 0] \
-                + 2 * (y - y0) * f[0, 1]
-
-            Lgb = 2 * (x - x0) * g1 \
-                + 2 * (y - y0) * g2
-
-        elif current_area == 2:
-            b = (z - z0) ** 2 - (d/2) ** 2
-
-            Lfb = 2 * (z - z0) * f[0, 2]
-            Lgb = 2 * (z - z0) * g3
-
-        elif current_area == 3:
-            b = (x - x0) ** 2 + (y - y0) ** 2 + (z - z0) ** 2 - (r ** 2 + (d / 2) ** 2)
-
-            Lfb = 2 * (x - x0) * f[0, 0] \
-                  + 2 * (y - y0) * f[0, 1] \
-                  + 2 * (z - z0) * f[0, 2]
-
-            Lgb = 2 * (x - x0) * g1 \
-                  + 2 * (y - y0) * g2 \
-                  + 2 * (z - z0) * g3
-
+        # Reset requires_grad to False before using psm_pos further
+        psm_pos.requires_grad_(False)
+        
+        # Obtain the dynamics
+        net_out = self.net(psm_pos)  # [1, 12]
+        fx = net_out[:, :self.x_dim]  # [1, 3]
+        gx = net_out[:, self.x_dim:]  # [1, 9]
+        gx = torch.reshape(gx, (self.u_dim, self.x_dim))
+        
+        # Compute Lie derivative
+        Lfb = grad_b @ fx.T  # [1, 1]
+        Lgb = grad_b @ gx.T  # [1, 9]
+        
         gamma = 1
-        b_safe = Lfb + gamma * b
-        A_safe = -Lgb
+        G = -Lgb.to(self.device)
+        h = (Lfb + gamma * b).to(self.device)
+        P = torch.eye(self.u_dim).to(self.device)
+        q = -u.T
 
-        dim = g1.shape[1]  # = 3
-        G = A_safe  # [1, 3]
-        h = b_safe.unsqueeze(0)  # [1, 1]
-        P = torch.eye(dim).to(self.device)  # [3, 3]
-        q = -u.T  # [3, 1]
-
-        # NOTE: different x from above now
-        x = cvx_solver(P.double(), q.double(), G.double(), h.double())
-
-        out = []
-        for i in range(dim):
-            out.append(x[i])
-        out = np.array(out)
-        out = torch.tensor(out).float().to(self.device)
-        out = out.unsqueeze(0)
-        return out
-
-    def dCBF_half_sphere(self, robot, u, f, g1, g2, g3, center, radius, current_area):
-        """Enforce CBF on action
-
-        Args:
-            robot  ([1, 3]): robot state
-            u  ([1, 3]): action
-            f  ([1, 3]): fx
-            g1 ([1, 3]): first row of gx
-            g2 ([1, 3]): second row of gx
-            g3 ([1, 3]): third row of gx
-        """
-        # Assign robot state
-        x, y, z = robot[0, 0], robot[0, 1], robot[0, 2]
-
-        # Obstacle point position
-        x0, y0, z0 = center
-
-        r = radius
-
-        # Compute barrier function
-        b = (x - x0) ** 2 + (y - y0) ** 2 + (z - z0) ** 2 - r ** 2
-
-        Lfb = 2 * (x - x0) * f[0, 0] \
-            + 2 * (y - y0) * f[0, 1] \
-            + 2 * (z - z0) * f[0, 2]
-
-        Lgb = 2 * (x - x0) * g1 \
-            + 2 * (y - y0) * g2 \
-            + 2 * (z - z0) * g3
-
-        gamma = 1
-        if current_area == 1:
-            b_safe = Lfb + gamma * b
-            A_safe = -Lgb
-        elif current_area == 2:
-            b_safe = -(Lfb + gamma * b)
-            A_safe = Lgb
-
-        dim = g1.shape[1]  # = 3
-        G = A_safe.to(self.device)
-        h = b_safe.unsqueeze(0).to(self.device)  # [1, 1]
-        P = torch.eye(dim).to(self.device)  # [3, 3]
-        q = -u.T  # [3, 1]
-
-        # NOTE: different x from above now
-        x = cvx_solver(P.double(), q.double(), G.double(), h.double())
-
-        out = []
-        for i in range(dim):
-            out.append(x[i])
-        out = np.array(out)
-        out = torch.tensor(out).float().to(self.device)
-        out = out.unsqueeze(0)
-        return out
-
-    def dCBF_cylinder(self, robot, u, f, g1, g2, g3, ori_vec, center, radius, current_area):
-        """Enforce CBF on action
-
-        Args:
-            robot  ([1, 3]): robot state
-            u  ([1, 3]): action
-            f  ([1, 3]): fx
-            g1 ([1, 3]): first row of gx
-            g2 ([1, 3]): second row of gx
-            g3 ([1, 3]): third row of gx
-        """
-        # Assign robot state
-        x, y, z = robot[0, 0], robot[0, 1], robot[0, 2]
-
-        # Obstacle point position
-        x0, y0, z0 = center
-        #  cylinder orientation vector
-        orix, oriy, oriz = ori_vec
-
-        r = radius
-
-        # proj_factor = orix * (x - x0) + oriy * (y - y0) + oriz * (z - z0)
-        # norm_vec_x = x - x0 - (orix * (x - x0) + oriy * (y - y0) + oriz * (z - z0)) * orix
-        # norm_vec_y = y - y0 - (orix * (x - x0) + oriy * (y - y0) + oriz * (z - z0)) * oriy
-        # norm_vec_z = z - z0 - (orix * (x - x0) + oriy * (y - y0) + oriz * (z - z0)) * oriz
-
-        # Compute barrier function
-        # derivation
-        # b = (x - x0 - (orix * (x - x0) + oriy * (y - y0) + oriz * (z - z0)) * orix) ** 2 +\
-        #     (y - y0 - (orix * (x - x0) + oriy * (y - y0) + oriz * (z - z0)) * oriy) ** 2 +\
-        #     (z - z0 - (orix * (x - x0) + oriy * (y - y0) + oriz * (z - z0)) * oriz) ** 2 - r ** 2
-        # b = ((1 - orix ** 2)(x - x0) - orix * (oriy * (y - y0) + oriz * (z - z0))) ** 2 +\
-        #     ((1 - oriy ** 2)(y - y0) - oriy * (orix * (x - x0) + oriz * (z - z0))) ** 2 +\
-        #     ((1 - oriz ** 2)(z - z0) - oriz * (orix * (x - x0) + oriy * (y - y0))) ** 2 - r ** 2
-        # b = ((1 - orix ** 2)(x - x0) - orix * oriy * (y - y0) - orix * oriz * (z - z0)) ** 2 +\
-        #     (- oriy * orix * (x - x0) + (1 - oriy ** 2)(y - y0) - oriy * oriz * (z - z0)) ** 2 +\
-        #     (- oriz * orix * (x - x0) - oriz * oriy * (y - y0) + (1 - oriz ** 2)(z - z0)) ** 2 - r ** 2
-        c1x = (1 - orix ** 2)
-        c1y = - orix * oriy
-        c1z = - orix * oriz
-        c2x = - oriy * orix
-        c2y = (1 - oriy ** 2)
-        c2z = - oriy * oriz
-        c3x = - oriz * orix
-        c3y = - oriz * oriy
-        c3z = (1 - oriz ** 2)
-        b = (c1x * (x - x0) + c1y * (y - y0) + c1z * (z - z0)) ** 2 +\
-            (c2x * (x - x0) + c2y * (y - y0) + c2z * (z - z0)) ** 2 +\
-            (c3x * (x - x0) + c3y * (y - y0) + c3z * (z - z0)) ** 2 - r ** 2
-
-        Lfb = (2 * c1x * (c1x * (x - x0) + c1y * (y - y0) + c1z * (z - z0)) +
-               2 * c2x * (c2x * (x - x0) + c2y * (y - y0) + c2z * (z - z0)) +
-               2 * c3x * (c3x * (x - x0) + c3y * (y - y0) + c3z * (z - z0))) * f[0, 0] \
-            + (2 * c1y * (c1x * (x - x0) + c1y * (y - y0) + c1z * (z - z0)) +
-               2 * c2y * (c2x * (x - x0) + c2y * (y - y0) + c2z * (z - z0)) +
-               2 * c3y * (c3x * (x - x0) + c3y * (y - y0) + c3z * (z - z0))) * f[0, 1] \
-            + (2 * c1z * (c1x * (x - x0) + c1y * (y - y0) + c1z * (z - z0)) +
-               2 * c2z * (c2x * (x - x0) + c2y * (y - y0) + c2z * (z - z0)) +
-               2 * c3z * (c3x * (x - x0) + c3y * (y - y0) + c3z * (z - z0))) * f[0, 2]
-
-        Lgb = (2 * c1x * (c1x * (x - x0) + c1y * (y - y0) + c1z * (z - z0)) +
-               2 * c2x * (c2x * (x - x0) + c2y * (y - y0) + c2z * (z - z0)) +
-               2 * c3x * (c3x * (x - x0) + c3y * (y - y0) + c3z * (z - z0))) * g1 \
-            + (2 * c1y * (c1x * (x - x0) + c1y * (y - y0) + c1z * (z - z0)) +
-               2 * c2y * (c2x * (x - x0) + c2y * (y - y0) + c2z * (z - z0)) +
-               2 * c3y * (c3x * (x - x0) + c3y * (y - y0) + c3z * (z - z0))) * g2 \
-            + (2 * c1z * (c1x * (x - x0) + c1y * (y - y0) + c1z * (z - z0)) +
-               2 * c2z * (c2x * (x - x0) + c2y * (y - y0) + c2z * (z - z0)) +
-               2 * c3z * (c3x * (x - x0) + c3y * (y - y0) + c3z * (z - z0))) * g3
-
-        gamma = 1
-        if current_area == 1:
-            b_safe = Lfb + gamma * b
-            A_safe = -Lgb
-        elif current_area == 2:
-            b_safe = -(Lfb + gamma * b)
-            A_safe = Lgb
-
-        dim = g1.shape[1]  # = 3
-        G = A_safe.to(self.device)
-        h = b_safe.unsqueeze(0).to(self.device)  # [1, 1]
-        P = torch.eye(dim).to(self.device)  # [3, 3]
-        q = -u.T  # [3, 1]
-
-        # NOTE: different x from above now
-        x = cvx_solver(P.double(), q.double(), G.double(), h.double())
-
-        out = []
-        for i in range(dim):
-            out.append(x[i])
-        out = np.array(out)
-        out = torch.tensor(out).float().to(self.device)
-        out = out.unsqueeze(0)
-        return out
-
-    def dCBF_complex_cylinder(self, robot, u, f, g1, g2, g3, radius, current_area):
-        """Enforce CBF on action
-
-        Args:
-            robot  ([1, 3]): robot state
-            u  ([1, 3]): action
-            f  ([1, 3]): fx
-            g1 ([1, 3]): first row of gx
-            g2 ([1, 3]): second row of gx
-            g3 ([1, 3]): third row of gx
-        """
-        # Assign robot state
-        x, y, z = robot[0, 0], robot[0, 1], robot[0, 2]
-
-        # Find the center line point
-        dis = np.sum((self.all_point - np.array([x.item(), y.item(), z.item()])) ** 2, axis=-1)
-        min_dis_ind = np.argmin(dis)
-        x0, y0, z0 = self.all_point[min_dis_ind].tolist()
-
-        r = radius
-
-        # Compute barrier function
-        b = (x - x0) ** 2 + (y - y0) ** 2 + (z - z0) ** 2 - r ** 2
-
-        Lfb = 2 * (x - x0) * f[0, 0] \
-            + 2 * (y - y0) * f[0, 1] \
-            + 2 * (z - z0) * f[0, 2]
-
-        Lgb = 2 * (x - x0) * g1 \
-            + 2 * (y - y0) * g2 \
-            + 2 * (z - z0) * g3
-
-        gamma = 1
-        if current_area == 1:
-            b_safe = Lfb + gamma * b
-            A_safe = -Lgb
-        elif current_area == 2:
-            b_safe = -(Lfb + gamma * b)
-            A_safe = Lgb
-
-        dim = g1.shape[1]  # = 3
-        G = A_safe.to(self.device)
-        h = b_safe.unsqueeze(0).to(self.device)  # [1, 1]
-        P = torch.eye(dim).to(self.device)  # [3, 3]
-        q = -u.T  # [3, 1]
-
-        # NOTE: different x from above now
-        x = cvx_solver(P.double(), q.double(), G.double(), h.double())
-
-        out = []
-        for i in range(dim):
-            out.append(x[i])
-        out = np.array(out)
-        out = torch.tensor(out).float().to(self.device)
-        out = out.unsqueeze(0)
-        return out
-
-    def build_mlp(self, filters, no_act_last_layer=True, activation='gelu'):
-        if activation == 'gelu':
-            activation = nn.GELU()
-        elif activation == 'silu':
-            activation = nn.SiLU()
-        elif activation == 'tanh':
-            activation = nn.Tanh()
-        else:
-            raise NotImplementedError(
-                f'Not supported activation function {activation}')
-        modules = nn.ModuleList()
-        for i in range(len(filters)-1):
-            modules.append(nn.Linear(filters[i], filters[i+1]))
-            if not (no_act_last_layer and i == len(filters)-2):
-                modules.append(activation)
-
-        modules = nn.Sequential(*modules)
-        return modules
+        modified_u = qp_solver(P.double(), q.double(), G.double(), h.double())
+        modified_u = torch.from_numpy(modified_u).float().to(self.device).reshape(1, -1)
+        return modified_u

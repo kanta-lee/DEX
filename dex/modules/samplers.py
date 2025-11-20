@@ -1,26 +1,20 @@
 from ..utils.general_utils import AttrDict, listdict2dictlist
 from ..utils.rl_utils import ReplayCache
 
-import sys
-sys.path.append('./CBF')
-from CBF.cbf import CBF
-sys.path.append('./CLF')
-from CLF.clf import CLF
-
 import os
 import torch
-from torchdiffeq import odeint
 import numpy as np
 import PIL.Image as Image
-from vec2orn import vector_to_euler
-import copy
-
-from surrol.utils.pybullet_utils import (
-    get_link_pose,
-)
 
 import pybullet as p
-from scipy.spatial.transform import Rotation
+
+from surrol.tasks.needle_pick_sphere import NeedlePickSphere
+from surrol.tasks.needle_pick_cylinder import NeedlePickCylinder
+from surrol.tasks.gauze_retrieve_sphere import GauzeRetrieveSphere
+from surrol.tasks.gauze_retrieve_cylinder import GauzeRetrieveCylinder
+
+from NeuralODE.node import NeuralODE
+from CBF.cbf import CBF
 
 
 class Sampler:
@@ -36,24 +30,27 @@ class Sampler:
         self._episode_step = 0
         self._episode_cache = ReplayCache(max_episode_len)
 
-        self.device = torch.device(
-            'cuda:' + str(0)
-            if torch.cuda.is_available() else 'cpu'
+        # ===============================================================
+        #                 Integrate Neural ODE and CBF
+        # ===============================================================
+
+        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        print('Seed:', self.cfg.seed)
+        self.supported_envs = (
+            GauzeRetrieveCylinder, 
+            GauzeRetrieveSphere, 
+            NeedlePickCylinder, 
+            NeedlePickSphere
         )
 
-        # Initialize neuralODE for CBF (Evaluation ONLY)
-        self.CBF = CBF([3, 64, 12]).to(self.device)
-        self.CBF.load_state_dict(torch.load(
-            f"./CBF/saved_model/{self.cfg.task[0:-1]}0/0/CBF10.pth"))
-        self.CBF.eval()
-        
-        self.CLF = CLF([3, 64, 6]).to(self.device)
-        self.CLF.load_state_dict(torch.load(
-            f"./CLF/saved_model/{self.cfg.task[0:-1]}0/0/CLF10.pth"))
-        self.CLF.eval()
+        # Initialize Neural ODE
+        self.node = NeuralODE([3, 64, 64, 12]).to(self.device)
+        self.node.load_latest_weight(self.cfg.task)
+        self.node.eval()
 
-        self.dcbf_constraint_type = int(self.cfg.task[-1])
-        print(f'constraint type is {self.dcbf_constraint_type}')
+        # Initialize CBF
+        self.cbf = CBF(self.node.net, self.device)
+
 
     def init(self):
         """Starts a new rollout. Render indicates whether output should contain image."""
@@ -62,16 +59,26 @@ class Sampler:
     def sample_action(self, obs, is_train):
         return self._agent.get_action(obs, noise=is_train)
 
-    def sample_episode(self, is_train, ep, render=False, random_act=False, render_three_views=False):
+    def sample_episode(self, is_train, ep=-1, render=False, random_act=False, render_three_views=False):
         """Samples one episode from the environment."""
         self.init()
         episode, done = [], False
-
-        # variable related to odeint in cbf and clf
-        tt = torch.tensor([0., 0.1]).to(self.device)
         
         # Store number of violations
         num_violations = 0
+        
+        # Determine path type
+        path_type = "CLF" if self.cfg.use_dclf else "CBF" if self.cfg.use_dcbf else "NONE"
+
+        # Create full path with seed
+        base_path = f"saved_eval_pic/{path_type}/{self.cfg.task}/s{self.cfg.seed}/{ep:02}"
+        os.makedirs(base_path, exist_ok=True)
+        
+        # Store actions for real demo
+        actions = []
+        
+        # Log object position in different episodes
+        print("Episode", ep, "Object position:", p.getBasePositionAndOrientation(self._env.env.obj_ids['rigid'][0]))
 
         # NOTE: Must change while loop's condition back to run train.py normally
         # while not done and self._episode_step < self._max_episode_len:
@@ -89,326 +96,52 @@ class Sampler:
                     render_obs = self._env.render('rgb_array')
 
                 img = Image.fromarray(render_obs)
-                if self.cfg.use_dclf:
-                    if not os.path.exists(f"saved_eval_pic/CLF/{self.cfg.task}/{ep:02}"):
-                        os.makedirs(f"saved_eval_pic/CLF/{self.cfg.task}/{ep:02}")
-                    img.save(f'saved_eval_pic/CLF/{self.cfg.task}/{ep:02}/image_{self._episode_step}.png')
-                    # print("Saved at", f'saved_eval_pic/CLF/{self.cfg.task}/{ep:02}/image_{self._episode_step}.png')
-                elif self.cfg.use_dcbf:
-                    if not os.path.exists(f"saved_eval_pic/CBF/{self.cfg.task}/{ep:02}"):
-                        os.makedirs(f"saved_eval_pic/CBF/{self.cfg.task}/{ep:02}")
-                    img.save(f'saved_eval_pic/CBF/{self.cfg.task}/{ep:02}/image_{self._episode_step}.png')
-                    # print("Saved at", f'saved_eval_pic/CBF/{self.cfg.task}/{ep:02}/image_{self._episode_step}.png')
-                else:
-                    if not os.path.exists(f"saved_eval_pic/NONE/{self.cfg.task}/{ep:02}"):
-                        os.makedirs(f"saved_eval_pic/NONE/{self.cfg.task}/{ep:02}")
-                    img.save(f'saved_eval_pic/NONE/{self.cfg.task}/{ep:02}/image_{self._episode_step}.png')
-                    # print("Saved at", f'saved_eval_pic/NONE/{self.cfg.task}/{ep:02}/image_{self._episode_step}.png')
-                # if not os.path.exists("saved_eval_pic"):
-                #     os.mkdir("saved_eval_pic")
-                # img.save(f'saved_eval_pic/image_{self._episode_step}.png')
+                img.save(f'{base_path}/image_{self._episode_step}.png')
+                
+            # ===============================================================
+            #                       Check Collision
+            # ===============================================================
 
-            # ===================== constraint test =====================
-            # Display whether the tip of the psm has touch the obstacle or not
-            # True : Collide
-            # False: Safe
-            if self.dcbf_constraint_type == 1:
-                # sphere constraint
-                # load the constraint center from the env
-                radius = 0.05
-                constraint_center, _ = get_link_pose(self._env.obj_ids['obstacle'][0], -1)
-                violate_constraint = self.CBF.constraint_valid(constraint_type=self.dcbf_constraint_type,
-                                                               robot=self._obs['observation'][0:3],
-                                                               constraint_center=constraint_center,
-                                                               radius=radius)
-            elif self.dcbf_constraint_type == 2:
-                # surface constraint
-                length = 0.01
-                point, surface_ori = get_link_pose(self._env.obj_ids['obstacle'][0], -1)
-                rot_matrix = Rotation.from_quat(np.array(surface_ori)).as_matrix()
-                # print(rot.as_euler('xyz'))
-                original_normal_vector = np.array([0, 1, 0]).reshape([3, 1])
-                normal_vector = (rot_matrix @ original_normal_vector).reshape(-1).tolist()
-                # print(normal_vector)
-                violate_constraint = self.CBF.constraint_valid(constraint_type=self.dcbf_constraint_type,
-                                                               robot=self._obs['observation'][0:3], point=point,
-                                                               normal_vector=normal_vector, length=length)
-            elif self.dcbf_constraint_type == 3:
-                # plate constraint
-                center, _ = get_link_pose(self._env.obj_ids['obstacle'][0], -1)
-                plate_length = 0.02
-                radius = 0.075
-                z_diff = self._obs['observation'][2]-center[2]
-                # area 1 or 2 or 3: add cbf constraint
-                if z_diff**2 < (plate_length/2)**2:
-                    violate_constraint = self.CBF.constraint_valid(constraint_type=self.dcbf_constraint_type,
-                                                        robot=self._obs['observation'][0:3],
-                                                        constraint_center=center, radius=radius)
-                    current_area = 1
-                else:
-                    violate_constraint = False
-                    b = (self._obs['observation'][0] - center[0]) ** 2 + (self._obs['observation'][1] - center[1]) ** 2\
-                        - radius ** 2
-                    if b <= 0:
-                        current_area = 2
-                    else:
-                        current_area = 3
-            elif self.dcbf_constraint_type == 4:
-                # half-sphere constraint
-                center, sphere_ori = get_link_pose(self._env.obj_ids['obstacle'][0], -1)
-                if self.cfg.task == 'PegTransfer-v4':
-                    radius = 0.1
-                else:
-                    radius = 0.05
-                rot_matrix = Rotation.from_quat(np.array(sphere_ori)).as_matrix()
-                original_normal_vector = np.array([0, 1, 0]).reshape([3, 1])
-                normal_vector = (rot_matrix @ original_normal_vector).reshape(-1).tolist()
-                # for area 0, the agent can stay in area 0 or go to area 1 or area 2
-                # for area 1, the agent can only stay in area 1 or go to area 0
-                # for area 2, the agent can only stay in area 2 or go to area 0
-                if np.dot(normal_vector, np.array(self._obs['observation'][0:3])-np.array(center)) < 0:
-                    out = self.CBF.constraint_valid(constraint_type=self.dcbf_constraint_type,
-                                                        robot=self._obs['observation'][0:3],
-                                                        constraint_center=center,
-                                                        radius=radius)
-                    if out:
-                        current_area = 1
-                    else:
-                        current_area = 2
-                else:
-                    current_area = 0
+            if not is_train and isinstance(self._env.env, self.supported_envs):
+                env = self._env.env
+                violate_constraint = env.check_collision()
                 
-                # print(current_area)
-                
-                if self._episode_step == 0:
-                    violate_constraint = False
-                else:
-                    if last_area + current_area == 3:
-                        # last and current areas are (1, 2) or (2, 1)
-                        violate_constraint = True
-                    else:
-                        violate_constraint = False
-                last_area = current_area
-            elif self.dcbf_constraint_type == 5:
-                # cylinder constraint
-                center, cylinder_ori = get_link_pose(self._env.obj_ids['obstacle'][0], -1)
-                cylinder_length = 0.35
-                radius = 0.06
-                rot_matrix = Rotation.from_quat(np.array(cylinder_ori)).as_matrix()
-                original_ori_vector = np.array([0, 0, 1]).reshape([3, 1])
-                current_ori_vector = (rot_matrix @ original_ori_vector).reshape(-1).tolist()
-                proj_vec = np.dot(current_ori_vector, np.array(self._obs['observation'][0:3])-np.array(center))
-                # for area 0, the agent can stay in area 0 or go to area 1 or area 2
-                # for area 1, the agent can only stay in area 1 or go to area 0
-                # for area 2, the agent can only stay in area 2 or go to area 0
-                if proj_vec**2 < (cylinder_length/2)**2:
-                    out = self.CBF.constraint_valid(constraint_type=self.dcbf_constraint_type,
-                                                        robot=self._obs['observation'][0:3],
-                                                        constraint_center=center, radius=radius,
-                                                        ori_vector=current_ori_vector)
-                    if out:
-                        current_area = 1
-                    else:
-                        current_area = 2
-                else:
-                    current_area = 0
-                if self._episode_step == 0:
-                    violate_constraint = False
-                else:
-                    if last_area + current_area == 3:
-                        # last and current areas are (1, 2) or (2, 1)
-                        violate_constraint = True
-                    else:
-                        violate_constraint = False
-                last_area = current_area
-            elif self.dcbf_constraint_type == 6:
-                # complex cylinder constraint
-                center, cylinder_ori = get_link_pose(self._env.obj_ids['obstacle'][0], -1)
-                cylinder_length = 0.1
-                radius = 0.05
-                total_length = cylinder_length*2+radius*2
-                # discretize the center line of the cylinder and store those discretized points
-                self.CBF.build_discretized_center_line(cylinder_length, radius, center, cylinder_ori)
-                rot_matrix = Rotation.from_quat(np.array(cylinder_ori)).as_matrix()
-                original_ori_vector = np.array([0, 0, 1]).reshape([3, 1])
-                current_ori_vector = (rot_matrix @ original_ori_vector).reshape(-1).tolist()
-                proj_vec = np.dot(current_ori_vector, np.array(self._obs['observation'][0:3])-np.array(center))
-                # for area 0, the agent can stay in area 0 or go to area 1 or area 2
-                # for area 1, the agent can only stay in area 1 or go to area 0
-                # for area 2, the agent can only stay in area 2 or go to area 0
-                if proj_vec**2 < (total_length/2)**2:
-                    out = self.CBF.constraint_valid(constraint_type=self.dcbf_constraint_type,
-                                                        robot=self._obs['observation'][0:3], radius=radius)
-                    if out:
-                        current_area = 1
-                    else:
-                        current_area = 2
-                else:
-                    current_area = 0
-                if self._episode_step == 0:
-                    violate_constraint = False
-                else:
-                    if last_area + current_area == 3:
-                        # last and current areas are (1, 2) or (2, 1)
-                        violate_constraint = True
-                    else:
-                        violate_constraint = False
-                last_area = current_area
-            else:
-                violate_constraint = False
-                
-            if violate_constraint:
-                num_violations += 1
-                print(f'Episode {ep:02}: warning: violate the constraint at episode step {self._episode_step}')
+                if violate_constraint:
+                    num_violations += 1
+                    print(f'Episode {ep:02}: warning: violate the constraint at episode step {self._episode_step}')
 
-            # ===================== CBF =====================
-            isModified = False
-            if self.cfg.use_dcbf and self.dcbf_constraint_type != 0:
+            # ===============================================================
+            #                  Control Barrier Function
+            # ===============================================================
+            # NOTE: Only use CBF during inference
+            if not is_train and self.cfg.use_dcbf and isinstance(self._env.env, self.supported_envs):
                 with torch.no_grad():
-                    x0 = torch.tensor(
-                        self._obs['observation'][0:3]).unsqueeze(0).to(self.device).float()
+                    u = 0.01 * self._env.env.SCALING * action[0:3]
+                    u = torch.tensor(u).unsqueeze(0).float().to(self.device)
 
-                    # 0.05 is scaling for needlepick only
-                    u0 = 0.05 * \
-                        torch.tensor(action[0:3]).unsqueeze(0).to(self.device).float()
-
-                    cbf_out = self.CBF.net(x0)  # [1, 12]
-
-                    # \dot{x} = f(x) + g(x) * u
-                    fx = cbf_out[:, :3]  # [1, 3]
-                    gx = cbf_out[:, 3:]  # [1, 9]
-
-                    g1, g2, g3 = torch.chunk(gx, 3, dim=-1)  # [1, 3]
-                    if self.dcbf_constraint_type == 1:
-                        modified_action = self.CBF.dCBF_sphere(x0, u0, fx, g1, g2, g3, constraint_center, radius)
-                    elif self.dcbf_constraint_type == 2:
-                        modified_action = self.CBF.dCBF_surface(x0, u0, fx, g1, g2, g3, point, normal_vector, length)
-                    elif self.dcbf_constraint_type == 3:
-                        modified_action = self.CBF.dCBF_plate(x0, u0, fx, g1, g2, g3,
-                                                              center, radius, plate_length, current_area)
-                    elif self.dcbf_constraint_type == 4:
-                        if current_area > 0:
-                            modified_action = self.CBF.dCBF_half_sphere(x0, u0, fx, g1, g2, g3,
-                                                                        center, radius, current_area)
-                        else:
-                            modified_action = torch.tensor(action[0:3]).to(self.device)*0.05
-                    elif self.dcbf_constraint_type == 5:
-                        if current_area > 0:
-                            modified_action = self.CBF.dCBF_cylinder(x0, u0, fx, g1, g2, g3,
-                                                                     current_ori_vector, center, radius, current_area)
-                        else:
-                            modified_action = torch.tensor(action[0:3]).to(self.device)*0.05
-                    elif self.dcbf_constraint_type == 6:
-                        print(current_area)
-                        if current_area > 0:
-                            modified_action = self.CBF.dCBF_complex_cylinder(x0, u0, fx, g1, g2, g3,
-                                                                             radius, current_area)
-                        else:
-                            modified_action = torch.tensor(action[0:3]).to(self.device)*0.05
-
-                    isModified = True
-                    # Check if action is modified by CBF
-                    if (modified_action.cpu().numpy() == 0.05 * action[0:3]).all():
-                        # print("ACTION IS NOT MODIFIED!!!")
-                        isModified = False
+                    if isinstance(self._env.env, NeedlePickSphere):
+                        env = self._env.env
+                        modified_action = self.cbf.needle_pick_sphere(u, env)
+                        
+                    elif isinstance(self._env.env, NeedlePickCylinder):
+                        env = self._env.env
+                        modified_action = self.cbf.needle_pick_cylinder(u, env)
+                        
+                    elif isinstance(self._env.env, GauzeRetrieveSphere):
+                        env = self._env.env
+                        modified_action = self.cbf.gauze_retrieve_sphere(u, env)
+                        
+                    elif isinstance(self._env.env, GauzeRetrieveCylinder):
+                        env = self._env.env
+                        modified_action = self.cbf.gauze_retrieve_cylinder(u, env)
                     
-                    # Remember to scale back the action before input into gym environment
-                    action[0:3] = modified_action.cpu().numpy() / 0.05
+                    # Scale back the action before input into gym environment
+                    action[0:3] = modified_action.cpu().numpy() / (0.01 * self._env.env.SCALING)
 
-            # ===================== CLF =====================
-            if isModified and self.cfg.use_dclf and self.dcbf_constraint_type != 0:
-                assert self.cfg.use_dcbf
-                with torch.no_grad():
-                    # predicted next position given the modified action
-                    self.CBF.u = modified_action
-                    pred_next_position = odeint(self.CBF, x0, tt)[1, :, :]
-
-                # ------------get desired orientation------------
-                # use predicted next position and the critic to get the desired orientation
-
-                # Get initial guess for orientation
-                with torch.no_grad():
-                    orn_x0 = torch.tensor(
-                        self._obs['observation'][3:6]).unsqueeze(0).to(self.device).float()
-                    self.CLF.u = torch.tensor(action[3].reshape(1, 1)).to(self.device).float()
-                    update_orn = odeint(self.CLF, orn_x0, tt)[1, 0, :]
-                # update_orn = torch.tensor(self._obs['observation'][3:6]).cuda().float()
-                for _ in range(10):
-                    o = torch.tensor(self._obs['observation']).reshape(1, -1).cuda().float()
-                    g = torch.tensor(self._obs['desired_goal']).reshape(1, -1).cuda().float()
-                    o[:, 0:3] = pred_next_position
-                    update_orn.requires_grad = True
-                    o[:, 3:6] = update_orn
-
-                    # calculate gradient of the critic with respect to the orientation
-                    input_tensor = self._agent._preproc_inputs(o, g, device='cuda')
-                    predicted_next_action = self._agent.actor(input_tensor)
-                    value = self._agent.critic_target(input_tensor, predicted_next_action)
-                    value.backward()
-
-                    update_grad = update_orn.grad.clone().detach()
-
-                    # update the orientation with the gradient
-                    step_size = 0.001
-                    with torch.no_grad():
-                        updated_orn = update_orn+update_grad*step_size
-
-                    # test the updated orn
-                    with torch.no_grad():
-                        o[:, 3:6] = updated_orn
-                        input_tensor = self._agent._preproc_inputs(o, g, device='cuda')
-                        predicted_next_action = self._agent.actor(input_tensor)
-                        value_new = self._agent.critic_target(input_tensor, predicted_next_action)
-                        if value_new.item() > value.item():
-                            # print(f'before update: {value.item()}')
-                            # print(f'before update: {update_orn}')
-                            # print(f'after update: {value_new.item()}')
-                            # print(f'after update: {updated_orn}')
-                            update_orn = updated_orn.clone().detach()
-                        else:
-                            break
-                desired_orn = update_orn.clone().detach().unsqueeze(0)
-
-                # use fixed desired orientation
-                # desired_orn = [0.0, 0.0, 1.0]  # vector_to_euler(needle_rel_pos)
-                # desired_orn = torch.tensor(desired_orn).unsqueeze(0).to(self.device).float()
-
-                # use waypoint orientation
-                # desired_orn = torch.tensor(self._obs['observation'][-3:]).unsqueeze(0).to(self.device).float()
-
-                # use rl policy to predict the desired orientation
-                # temp_obs = copy.deepcopy(self._obs)
-                # temp_obs['observation'][0:3] = pred_next_position.cpu().numpy()
-                # pred_action = self._env.action_space.sample(
-                #     ) if random_act else self.sample_action(temp_obs, is_train)
-                #
-                # # Get desired next orientation
-                # self.CLF.u = torch.tensor(pred_action[3].reshape(1, 1)).to(self.device).float()
-                # desired_orn = odeint(self.CLF, orn_x0, tt)[1, :, :]
-
-                # ------------use desired orientation------------
-                with torch.no_grad():
-                    orn_x0 = torch.tensor(
-                        self._obs['observation'][3:6]).unsqueeze(0).to(self.device).float()
-
-                    # 0.05 is scaling for needlepick only
-                    orn_u0 = np.deg2rad(30) * \
-                        torch.tensor(action[3]).unsqueeze(0).to(self.device).float()
-
-                    clf_out = self.CLF.net(orn_x0)  # [1, 6]
-
-                    # \dot{x} = f(x) + g(x) * u
-                    fx = clf_out[:, :3]  # [1, 3]
-                    gx = clf_out[:, 3:]  # [1, 3]
-
-                    modified_orn = self.CLF.dCLF(orn_x0, desired_orn, orn_u0, fx, gx)
-
-                    # Remember to scale back the action before input into gym environment
-                    action[3] = modified_orn.cpu().numpy() / np.deg2rad(30)
-
-
+                    # Append final action for real demo
+                    actions.append(action)
+            
             obs, reward, done, info = self._env.step(action)
-            # print(info)
             episode.append(AttrDict(
                 reward=reward,
                 success=info['is_success'],
@@ -422,16 +155,18 @@ class Sampler:
             self._obs = obs
             self._episode_step += 1
 
-        if episode[-1]['success'] == 1.0:
-            if self.cfg.use_dclf:
-                success_filename = f"saved_eval_pic/CLF/{self.cfg.task}/{ep:02}/success.txt"
-            elif self.cfg.use_dcbf:
-                success_filename = f"saved_eval_pic/CBF/{self.cfg.task}/{ep:02}/success.txt"
-            else:
-                success_filename = f"saved_eval_pic/NONE/{self.cfg.task}/{ep:02}/success.txt"
-            with open(success_filename, 'w') as file:
-                file.write("Hello, World!\n")
-            file.close()
+        if not is_train and episode[-1]['success'] == 1.0:
+            # Just a file to indicate which episode is success.
+            success_file = f"{base_path}/success.txt"
+            open(success_file, 'w').close()
+        
+        if not is_train and self.cfg.use_dcbf and isinstance(self._env.env, self.supported_envs):
+            # Save action sequence for real world demonstration
+            actions = np.array(actions)
+            action_filename = f"{base_path}/actions.npy"
+            np.save(action_filename, actions)
+            print("Images and actions are saved at", base_path)
+        
         # make sure episode is marked as done at final time step
         episode[-1].done = True
         rollouts = self._episode_cache.pop()
