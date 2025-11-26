@@ -140,6 +140,12 @@ class Sampler:
 
                     # Append final action for real demo
                     actions.append(action)
+
+            # ===============================================================
+            #                  Control Lyapunov Function
+            # ===============================================================
+            # NOTE: Only use CLF during inference
+            # if not is_train and self.cfg.use_dclf and isinstance(self._env.env, self.supported_envs):
             
             obs, reward, done, info = self._env.step(action)
             episode.append(AttrDict(
