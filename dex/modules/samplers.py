@@ -8,6 +8,7 @@ import PIL.Image as Image
 
 import pybullet as p
 
+from surrol.tasks.needle_pick import NeedlePick
 from surrol.tasks.needle_pick_sphere import NeedlePickSphere
 from surrol.tasks.needle_pick_cylinder import NeedlePickCylinder
 from surrol.tasks.gauze_retrieve_sphere import GauzeRetrieveSphere
@@ -15,6 +16,7 @@ from surrol.tasks.gauze_retrieve_cylinder import GauzeRetrieveCylinder
 
 from NeuralODE.node import NeuralODE
 from CBF.cbf import CBF
+from CLF.clf import PositionCLF
 
 
 class Sampler:
@@ -31,12 +33,13 @@ class Sampler:
         self._episode_cache = ReplayCache(max_episode_len)
 
         # ===============================================================
-        #                 Integrate Neural ODE and CBF
+        #                 Integrate Neural ODE, CBF and CLF
         # ===============================================================
 
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         print('Seed:', self.cfg.seed)
         self.supported_envs = (
+            NeedlePick,
             GauzeRetrieveCylinder, 
             GauzeRetrieveSphere, 
             NeedlePickCylinder, 
@@ -50,6 +53,9 @@ class Sampler:
 
         # Initialize CBF
         self.cbf = CBF(self.node.net, self.device)
+
+        # Initialize CLF
+        self.clf = PositionCLF(self.node.net, self.device)
 
 
     def init(self):
@@ -66,6 +72,9 @@ class Sampler:
         
         # Store number of violations
         num_violations = 0
+
+        # Store deviation from the CLF trajectory
+        deviation = 0
         
         # Determine path type
         path_type = "CLF" if self.cfg.use_dclf else "CBF" if self.cfg.use_dcbf else "NONE"
@@ -104,7 +113,11 @@ class Sampler:
 
             if not is_train and isinstance(self._env.env, self.supported_envs):
                 env = self._env.env
-                violate_constraint = env.check_collision()
+                if hasattr(env, 'check_collision'):
+                    # only some environments have collision constraints
+                    violate_constraint = env.check_collision()
+                else:
+                    violate_constraint = False
                 
                 if violate_constraint:
                     num_violations += 1
@@ -134,18 +147,34 @@ class Sampler:
                     elif isinstance(self._env.env, GauzeRetrieveCylinder):
                         env = self._env.env
                         modified_action = self.cbf.gauze_retrieve_cylinder(u, env)
+                    else:
+                        raise ValueError("Unsupported environment for CBF, such as no constraints defined for this env.")
                     
                     # Scale back the action before input into gym environment
                     action[0:3] = modified_action.cpu().numpy() / (0.01 * self._env.env.SCALING)
-
-                    # Append final action for real demo
-                    actions.append(action)
 
             # ===============================================================
             #                  Control Lyapunov Function
             # ===============================================================
             # NOTE: Only use CLF during inference
-            # if not is_train and self.cfg.use_dclf and isinstance(self._env.env, self.supported_envs):
+            if not is_train and self.cfg.use_dclf and isinstance(self._env.env, self.supported_envs):
+                with torch.no_grad():
+                    u = 0.01 * self._env.env.SCALING * action[0:3]
+                    u = torch.tensor(u).unsqueeze(0).float().to(self.device)
+
+                    if isinstance(self._env.env, NeedlePick):
+                        env = self._env.env
+                        print('original action at step {}:'.format(self._episode_step), u)
+                        modified_action = self.clf.needle_pick_spiral(u, env)
+                        if not torch.allclose(modified_action, u):
+                            print('updated action at step {}:'.format(self._episode_step), modified_action)
+                    else:
+                        raise ValueError("Unsupported environment for CLF, such as no CLF defined for this env.")
+                    # Scale back the action before input into gym environment
+                    action[0:3] = modified_action.cpu().numpy() / (0.01 * self._env.env.SCALING)
+
+            # Append final action for real demo
+            actions.append(action)
             
             obs, reward, done, info = self._env.step(action)
             episode.append(AttrDict(
