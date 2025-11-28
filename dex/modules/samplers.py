@@ -74,7 +74,7 @@ class Sampler:
         num_violations = 0
 
         # Store deviation from the CLF trajectory
-        deviation = 0
+        deviation = []
         
         # Determine path type
         path_type = "CLF" if self.cfg.use_dclf else "CBF" if self.cfg.use_dcbf else "NONE"
@@ -164,10 +164,7 @@ class Sampler:
 
                     if isinstance(self._env.env, NeedlePick):
                         env = self._env.env
-                        print('original action at step {}:'.format(self._episode_step), u)
-                        modified_action = self.clf.needle_pick_spiral(u, env)
-                        if not torch.allclose(modified_action, u):
-                            print('updated action at step {}:'.format(self._episode_step), modified_action)
+                        modified_action, p_ref = self.clf.needle_pick_spiral(u, env)
                     else:
                         raise ValueError("Unsupported environment for CLF, such as no CLF defined for this env.")
                     # Scale back the action before input into gym environment
@@ -186,9 +183,17 @@ class Sampler:
             if render:
                 episode[-1].update(AttrDict(image=render_obs))
 
+            # record deviation
+            if not is_train and self.cfg.use_dclf and isinstance(self._env.env, self.supported_envs):
+                if p_ref is not None:
+                    current_dev = np.linalg.norm(env._get_robot_state(0)[:3]-p_ref)
+                    deviation.append(current_dev)
+
             # update stored observation
             self._obs = obs
             self._episode_step += 1
+
+        print(f'mean deviation:', np.array(deviation).mean() if len(deviation) > 0 else 0.0)
 
         if not is_train and episode[-1]['success'] == 1.0:
             # Just a file to indicate which episode is success.
