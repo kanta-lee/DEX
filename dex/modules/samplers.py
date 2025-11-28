@@ -11,6 +11,7 @@ import pybullet as p
 from surrol.tasks.needle_pick import NeedlePick
 from surrol.tasks.needle_pick_sphere import NeedlePickSphere
 from surrol.tasks.needle_pick_cylinder import NeedlePickCylinder
+from surrol.tasks.gauze_retrieve import GauzeRetrieve
 from surrol.tasks.gauze_retrieve_sphere import GauzeRetrieveSphere
 from surrol.tasks.gauze_retrieve_cylinder import GauzeRetrieveCylinder
 
@@ -40,6 +41,7 @@ class Sampler:
         print('Seed:', self.cfg.seed)
         self.supported_envs = (
             NeedlePick,
+            GauzeRetrieve,
             GauzeRetrieveCylinder, 
             GauzeRetrieveSphere, 
             NeedlePickCylinder, 
@@ -164,7 +166,10 @@ class Sampler:
 
                     if isinstance(self._env.env, NeedlePick):
                         env = self._env.env
-                        modified_action, p_ref = self.clf.needle_pick_spiral(u, env)
+                        modified_action, p_ref = self.clf.traj_tracking(u, env)
+                    elif isinstance(self._env.env, GauzeRetrieve):
+                        env = self._env.env
+                        modified_action, p_ref = self.clf.traj_tracking(u, env)
                     else:
                         raise ValueError("Unsupported environment for CLF, such as no CLF defined for this env.")
                     # Scale back the action before input into gym environment

@@ -30,7 +30,6 @@ class PositionCLF():
         _spiral_horizon = 30
         _spiral_turns = 3.0
 
-        key = id(env)
         goal = np.asarray(env.goal, dtype=np.float32)
         start = np.asarray(env._get_robot_state(0)[:3], dtype=np.float32)
         steps = max(_spiral_horizon, 1)
@@ -58,16 +57,65 @@ class PositionCLF():
         traj.append(goal.copy())
         traj = np.asarray(traj, dtype=np.float32)
 
-        self._traj_states[key] = {
+        self._traj_states[env.__class__.__name__] = {
             'goal': goal,
             'start': start,
             'traj': traj,
         }
 
-    def _get_spiral_reference(self, env):
-        key = id(env)
+    def _init_wipe_state(self, env):
+        _wipe_horizon = 40
+        _amp = 0.5
+        _num_zigzags = 3
+
+        goal = np.asarray(env.goal, dtype=np.float32)
+        start = np.asarray(env._get_robot_state(0)[:3], dtype=np.float32)
+        steps = max(_wipe_horizon, 2)
+
+        # Build a zigzag path between start and goal in the XY plane with a gentle lateral offset.
+        delta_xy = goal[:2] - start[:2]
+        norm_xy = np.linalg.norm(delta_xy*2)
+        if norm_xy < 1e-6:
+            # Default to an arbitrary direction if start and goal overlap in XY.
+            delta_xy = np.array([1.0, 0.0], dtype=np.float32)
+            norm_xy = 1.0
+        dir_xy = delta_xy / norm_xy
+        # Perpendicular direction to create the zigzag offsets.
+        perp_xy = np.array([-dir_xy[1], dir_xy[0]], dtype=np.float32)
+
+        # Offset amplitude: scale with environment but keep it bounded by the path length.
+        scale = getattr(env, 'SCALING', 1.0)
+        max_amp = _amp * norm_xy
+        amp = min(0.01 * scale, max_amp if max_amp > 1e-6 else 0.01 * scale)
+
+        t_vals = np.linspace(0.0, 1.0, steps)
+        traj = []
+        for t in t_vals:
+            base_xy = start[:2] + t * delta_xy
+            offset_mag = amp * np.sin(2 * np.pi * _num_zigzags * t)
+            xy = base_xy + offset_mag * perp_xy
+            z = start[2] + t * (goal[2] - start[2])
+            traj.append([xy[0], xy[1], z])
+
+        # Ensure the final point reaches the goal.
+        traj.append(goal.copy())
+        traj = np.asarray(traj, dtype=np.float32)
+
+        self._traj_states[env.__class__.__name__] = {
+            'goal': goal,
+            'start': start,
+            'traj': traj,
+        }
+
+    def _get_reference(self, env):
+        key = env.__class__.__name__
         if key not in self._traj_states:
-            self._init_spiral_state(env)
+            if key == 'NeedlePick':
+                self._init_spiral_state(env)
+            elif key == 'GauzeRetrieve':
+                self._init_wipe_state(env)
+            else:
+                raise ValueError("Unsupported environment for CLF, such as no trajectory defined for this env.")
             self.traj_idx = 0
         state = self._traj_states[key]
 
@@ -86,13 +134,14 @@ class PositionCLF():
 
         return p_ref
 
+
     @torch.no_grad()
-    def needle_pick_spiral(self, u, env):
+    def traj_tracking(self, u, env):
         # Only engage CLF after the needle is grasped.
         if not hasattr(env, "_activated") or env._activated < 0:
             return u, None
 
-        p_ref = self._get_spiral_reference(env)
+        p_ref = self._get_reference(env)
         psm_pos = env._get_robot_state(0)[:3]
 
         p_ref_t = torch.from_numpy(p_ref).float().unsqueeze(0).to(self.device)
