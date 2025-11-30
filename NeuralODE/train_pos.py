@@ -34,15 +34,16 @@ def setup_argparser() -> argparse.ArgumentParser:
     
     return parser
 
+
 def load_data(task_name: str, device: torch.device) -> Tuple:
     """Loads and pre-processes training and testing data."""
     print(f"Loading data for task: {task_name}")
     
     try:
-        obs_orn = np.load(f'data/{task_name}/obs_orn.npy') 
-        acs_orn = np.load(f'data/{task_name}/acs_orn.npy')
-        obs_pos = np.load(f'data/{task_name}/obs_pos.npy')
-        acs_pos = np.load(f'data/{task_name}/acs_pos.npy')
+        # obs shape is [Total Trajs, data_size + 1, state_dim]
+        obs = np.load(f'data/{task_name}/obs_pos.npy')
+        # acs shape is [Total Trajs, data_size, action_dim]
+        acs = np.load(f'data/{task_name}/acs_pos.npy')
     except FileNotFoundError:
         print(f"Error: Data files not found in 'data/{task_name}/'.")
         print("Please ensure the data is correctly placed.")
@@ -50,30 +51,14 @@ def load_data(task_name: str, device: torch.device) -> Tuple:
 
     # Scale action
     SCALING = 5.0 # See SurRoL code
-    acs_pos = acs_pos * 0.01 * SCALING
-
-    if task_name == 'NeedlePick-v1' or task_name == 'NeedlePick-v2':
-        # obs_orn: [num_demo, num_timestep, 4] - [roll, pitch, yaw, jaw_angle]
-        # Excluding jaw_angle as it's not part of the control space
-        obs_orn = obs_orn[:, :, 0:3]
-
-        # Using only d_yaw (scaled by 30 degrees to radians) as control input
-        # jaw_status (0.5: open, -0.5: closed) is excluded as it's a discrete action
-        acs_orn = acs_orn[:, :, [0]] * np.deg2rad(30)
-
-        # Concatenate obs_pos with obs_orn and acs_pos with acs_orn
-        obs = np.concatenate([obs_pos, obs_orn], axis=2)
-        acs = np.concatenate([acs_pos, acs_orn], axis=2)
-    else:
-        # GauzeRetrieve-v1 and GauzeRetrieve-v2 have no yaw control.
-        obs = obs_pos
-        acs = acs_pos
+    acs = acs * 0.01 * SCALING
 
     # Convert to torch tensor
     obs = torch.from_numpy(obs).float().to(device)
     acs = torch.from_numpy(acs).float().to(device)
 
     # Add a singleton dimension for 'channel'
+    # Shapes become [num_traj, traj_len, 1, dim]
     x_all = obs.unsqueeze(2)
     u_all = acs.unsqueeze(2)
 
@@ -164,9 +149,6 @@ def run_evaluation(
             
             # Get the predicted state at t=0.1
             x_next = pred[-1, :, :] # Shape [1, x_dim]
-
-            # Wrap angle to be between [-np.pi, np.pi] for orientation
-            x_next[:, 3:] = torch.remainder(x_next[:, 3:] + np.pi, 2 * np.pi) - np.pi
             
             # Concat predicted next state
             pred_x_test = torch.cat(
@@ -239,9 +221,6 @@ def train(args: argparse.Namespace):
                 # Get the predicted state at t=0.1
                 x_next = pred[-1, :, :, :]
 
-                # Wrap angle to be between [-np.pi, np.pi] for orientation
-                x_next[:, :, 3:] = torch.remainder(x_next[:, :, 3:] + np.pi, 2 * np.pi) - np.pi
-
                 # Concat predicted next state
                 pred_x_rollout = torch.cat(
                     [pred_x_rollout, x_next.unsqueeze(0)], dim=0)
@@ -266,7 +245,7 @@ def train(args: argparse.Namespace):
                 func, x_test, u_test, x_test0, t_step_vec, args.data_size
             )
             # Save weights
-            save_path = f'{saved_folder}/model_iter_{itr}.pth'
+            save_path = f'{saved_folder}/model_pos_iter_{itr}.pth'
             torch.save(func.state_dict(), save_path)
             print(f"Model saved to {save_path}")
 

@@ -47,8 +47,7 @@ else:
         pass
     else:
         print(f"Directory {args.task} already exists and is not empty.")
-        print("Installing data for orientation")
-        # exit(0)
+        exit(0)
 
 # Load raw demonstration data
 data = np.load(
@@ -65,25 +64,25 @@ if args.task not in TASKS:
 num_demo, num_timestep = data['obs'].shape
 
 # Initialize arrays for single PSM tasks
-# obs_pos = np.zeros((num_demo, num_timestep, 3))  # [demo, timestep, xyz]
-# acs_pos = data['acs'][:, :, 0:3]       # [demo, timestep, dx,dy,dz]
-obs_orn = np.zeros((num_demo, num_timestep, 4))  # [demo, timestep, wxyz]
-acs_orn = data['acs'][:, :, 3:]  # [demo, timestep, yaw, jaw]
+obs_pos = np.zeros((num_demo, num_timestep, 3))  # [demo, timestep, xyz]
+acs_pos = data['acs'][:, :, 0:3]       # [demo, timestep, [dx, dy, dz]]
+obs_orn = np.zeros((num_demo, num_timestep, 4))  # [demo, timestep, [roll, pitch, yaw, jaw_angle]]
+acs_orn = data['acs'][:, :, 3:]  # [demo, timestep, [d_yaw, jaw]]
 
 # Extract position data from observations
 for demo_idx in range(num_demo):
     for timestep_idx in range(num_timestep):
         # Extract x, y, z coordinates from observation
-        # obs_pos[demo_idx, timestep_idx, :] = \
-        #     data['obs'][demo_idx][timestep_idx]['observation'][0:3]
+        obs_pos[demo_idx, timestep_idx, :] = \
+            data['obs'][demo_idx][timestep_idx]['observation'][0:3]
         
         # Extract w, x, y, z coordinates from observation
         obs_orn[demo_idx, timestep_idx, :] = \
             data['obs'][demo_idx][timestep_idx]['observation'][3:7]
 
 # Save processed data to files
-# np.save(f'data/{args.task}/obs_pos.npy', obs_pos)
-# np.save(f'data/{args.task}/acs_pos.npy', acs_pos)
+np.save(f'data/{args.task}/obs_pos.npy', obs_pos)
+np.save(f'data/{args.task}/acs_pos.npy', acs_pos)
 np.save(f'data/{args.task}/obs_orn.npy', obs_orn)
 np.save(f'data/{args.task}/acs_orn.npy', acs_orn)
 
