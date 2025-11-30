@@ -187,7 +187,7 @@ def train(args: argparse.Namespace):
     # Set up the dimension of the network
     # Input: x_dim
     # Output: f(x) [x_dim] + g(x) [x_dim * u_dim]
-    layer_dims = [x_dim, 64, 64, x_dim + x_dim * u_dim]
+    layer_dims = [x_dim, 64, x_dim + x_dim * u_dim]
 
     # Initialize neural ODE
     func = NeuralODE(layer_dims).to(device)
