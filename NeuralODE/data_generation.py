@@ -21,8 +21,10 @@ NOTE: This code only supports tasks that use a single PSM (Patient Side Manipula
 import numpy as np
 import argparse
 import os
+from tqdm import tqdm
 
 TASKS = [
+    'NeedlePick-v0',
     'NeedlePick-v1', 
     'NeedlePick-v2', 
     'GauzeRetrieve-v1', 
@@ -69,8 +71,10 @@ acs_pos = data['acs'][:, :, 0:3]       # [demo, timestep, [dx, dy, dz]]
 obs_orn = np.zeros((num_demo, num_timestep, 4))  # [demo, timestep, [roll, pitch, yaw, jaw_angle]]
 acs_orn = data['acs'][:, :, 3:]  # [demo, timestep, [d_yaw, jaw]]
 
+obj_pos = np.zeros((num_demo, num_timestep, 3))  # [demo, timestep, xyz]
+
 # Extract position data from observations
-for demo_idx in range(num_demo):
+for demo_idx in tqdm(range(num_demo), desc='demos', unit='demo'):
     for timestep_idx in range(num_timestep):
         # Extract x, y, z coordinates from observation
         obs_pos[demo_idx, timestep_idx, :] = \
@@ -80,10 +84,15 @@ for demo_idx in range(num_demo):
         obs_orn[demo_idx, timestep_idx, :] = \
             data['obs'][demo_idx][timestep_idx]['observation'][3:7]
 
+        # Extract x, y, z coordinates from observation
+        obj_pos[demo_idx, timestep_idx, :] = \
+            data['obs'][demo_idx][timestep_idx]['observation'][7:10]
+
 # Save processed data to files
 np.save(f'data/{args.task}/obs_pos.npy', obs_pos)
 np.save(f'data/{args.task}/acs_pos.npy', acs_pos)
 np.save(f'data/{args.task}/obs_orn.npy', obs_orn)
 np.save(f'data/{args.task}/acs_orn.npy', acs_orn)
+np.save(f'data/{args.task}/obj_pos.npy', obj_pos)
 
 print(f"Data processing completed for {args.task}")
