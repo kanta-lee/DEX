@@ -17,7 +17,7 @@ from surrol.tasks.gauze_retrieve_cylinder import GauzeRetrieveCylinder
 
 from NeuralODE.node import NeuralODE
 from CBF.cbf import CBF
-from CLF.clf import PositionCLF
+from CLF.clf import PositionCLF, CLF
 
 
 class Sampler:
@@ -49,7 +49,12 @@ class Sampler:
         )
 
         # Initialize Neural ODE
-        self.node = NeuralODE([3, 64, 64, 12]).to(self.device)
+        # the neural ode has dims [x_dim, 64, x_dim + x_dim * u_dim]
+        # position and orientation
+        self.node = NeuralODE([6, 64, 30]).to(self.device)
+        # position only
+        # self.node = NeuralODE([3, 64, 12]).to(self.device)
+
         self.node.load_latest_weight(self.cfg.task)
         self.node.eval()
 
@@ -57,7 +62,8 @@ class Sampler:
         self.cbf = CBF(self.node.net, self.device)
 
         # Initialize CLF
-        self.clf = PositionCLF(self.node.net, self.device)
+        # self.clf = PositionCLF(self.node.net, self.device)
+        self.clf = CLF(self.node.net, self.device)
 
 
     def init(self):
@@ -161,8 +167,10 @@ class Sampler:
             # NOTE: Only use CLF during inference
             if not is_train and self.cfg.use_dclf and isinstance(self._env.env, self.supported_envs):
                 with torch.no_grad():
-                    u = 0.01 * self._env.env.SCALING * action[0:3]
-                    u = torch.tensor(u).unsqueeze(0).float().to(self.device)
+                    u_pos = 0.01 * self._env.env.SCALING * action[0:3]
+                    u_ori = action[[3]] * np.deg2rad(30)
+
+                    u = torch.tensor(np.concatenate((u_pos, u_ori))).unsqueeze(0).float().to(self.device)
 
                     if isinstance(self._env.env, NeedlePick):
                         env = self._env.env
@@ -173,7 +181,8 @@ class Sampler:
                     else:
                         raise ValueError("Unsupported environment for CLF, such as no CLF defined for this env.")
                     # Scale back the action before input into gym environment
-                    action[0:3] = modified_action.cpu().numpy() / (0.01 * self._env.env.SCALING)
+                    action[0:3] = modified_action[:, 0:3].cpu().numpy() / (0.01 * self._env.env.SCALING)
+                    action[3] = modified_action[:, 3].cpu().numpy() / np.deg2rad(30)
 
             # Append final action for real demo
             actions.append(action)
@@ -191,7 +200,9 @@ class Sampler:
             # record deviation
             if not is_train and self.cfg.use_dclf and isinstance(self._env.env, self.supported_envs):
                 if p_ref is not None:
-                    current_dev = np.linalg.norm(env._get_robot_state(0)[:3]-p_ref)
+
+                    current_dev = (np.linalg.norm(env._get_robot_state(0)[:3]-p_ref[0:3])+
+                                   self.clf.yaw_difference(env._get_robot_state(0)[5], p_ref[3]))
                     deviation.append(current_dev)
 
             # update stored observation
