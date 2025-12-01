@@ -65,6 +65,25 @@ if args.task not in TASKS:
 
 num_demo, num_timestep = data['obs'].shape
 
+if args.task in ['NeedlePick-v1', 'NeedlePick-v2']:
+    '''
+    Observation len = 33
+    obs[0:7]: PSM's pose (3 position, 3 euler angle, 1 jaw status)
+    obs[7:10]: Object's position (Needle's base link position) (I don't think it is useful because it is not exactly on the needle)
+    obs[10:13]: Object's relative position (obs[7:10] - obs[0:3])
+    obs[13:16]: Position of center of the needle (the usual pick up place)
+    obs[16:19]: Orientation of center of the needle (Euler angles)
+    obs[19:22]: Position of left end of the needle
+    obs[22:25]: Orientation of left end of the needle (Euler angles)
+    obs[25:28]: Position of right end of the needle
+    obs[28:31]: Orientation of right end of the needle (Euler angles)
+    '''
+
+    # TODO: I have listed all the info from obs and generate the SurRoL demo data. 
+    #       Choose what you need for ODE training.
+    #       Make sure you change the dimension of obs_pos, obs_orn, acs_pos, acs_orn accordingly.
+    ...
+
 # Initialize arrays for single PSM tasks
 obs_pos = np.zeros((num_demo, num_timestep, 3))  # [demo, timestep, xyz]
 acs_pos = data['acs'][:, :, 0:3]       # [demo, timestep, [dx, dy, dz]]
@@ -79,6 +98,9 @@ for demo_idx in tqdm(range(num_demo), desc='demos', unit='demo'):
         # Extract x, y, z coordinates from observation
         obs_pos[demo_idx, timestep_idx, :] = \
             data['obs'][demo_idx][timestep_idx]['observation'][0:3]
+
+        # TODO: Index in specified order
+        # data['obs'][demo_idx][timestep_idx]['observation'][[0, 1, 2, 7, 8, 9, 13, 14, 15, ...]]
         
         # Extract w, x, y, z coordinates from observation
         obs_orn[demo_idx, timestep_idx, :] = \
