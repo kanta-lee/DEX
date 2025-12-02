@@ -60,13 +60,13 @@ class Sampler:
         self.cbf = CBF(self.node.net, self.device)
 
         # position and orientation and obj position
-        self.obj_node = NeuralODE([6, 64, 30]).to(self.device)
+        self.pos_ori_node = NeuralODE([6, 64, 30]).to(self.device)
 
         # Initialize CLF
         # self.clf = PositionCLF(self.node.net, self.device)
         # self.clf = CLF(self.orn_node.net, self.device)
-        self.obj_node.load_latest_weight(self.cfg.task, type='obj_')
-        self.clf = ObjCLF(self.obj_node.net, self.device)
+        self.pos_ori_node.load_latest_weight(self.cfg.task, type='')
+        self.clf = CLF(self.pos_ori_node.net, self.device)
 
 
     def init(self):
@@ -204,11 +204,14 @@ class Sampler:
             if not is_train and self.cfg.use_dclf and isinstance(self._env.env, self.supported_envs):
                 if p_ref is not None:
 
-                    # current_dev = (np.linalg.norm(env._get_robot_state(0)[:3]-p_ref[0:3])+
-                    #                self.clf.yaw_difference(env._get_robot_state(0)[5], p_ref[3]))
-                    needle_pos, needle_ori = self.clf.get_left_needle_pos(env)
-                    current_dev = np.linalg.norm(needle_pos-p_ref)
-                    print(f'current_step {self._episode_step} deviation from ref:', current_dev)
+                    current_dev = (np.linalg.norm(env._get_robot_state(0)[:3]-p_ref[0:3])+
+                                   self.clf.yaw_difference(env._get_robot_state(0)[5], p_ref[3]))
+                    # needle_pos, needle_ori = self.clf.get_left_needle_pos(env)
+                    # current_dev = np.linalg.norm(needle_pos-p_ref[0:3])+self.clf.yaw_difference(needle_ori[2], p_ref[3])
+                    # print(f'current_step {self._episode_step} deviation from ref:', current_dev,
+                    #       np.linalg.norm(needle_pos-p_ref[0:3]), self.clf.yaw_difference(needle_ori[2], p_ref[3]))
+                    # print('Current position and yaw:', needle_pos, needle_ori[2])
+                    # print('Reference position and yaw:', p_ref[0:3], p_ref[3])
                     deviation.append(current_dev)
 
             # update stored observation

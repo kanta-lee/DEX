@@ -60,8 +60,8 @@ def load_data(task_name: str, device: torch.device) -> Tuple:
     # jaw_status (0.5: open, -0.5: closed) is excluded as it's a discrete action
     acs_orn = acs_orn[:, :, [0]] * np.deg2rad(30)
 
-    # Concatenate obs_pos with obs_orn, obj_pos and acs_pos with acs_orn
-    obs = np.concatenate([obj_pos, obj_orn], axis=2)
+    # Concatenate obj_pos with obj_orn, obj_pos and acs_pos with acs_orn
+    obs = np.concatenate([obj_pos, obj_orn[:, :, 0:3]], axis=2)
     acs = np.concatenate([acs_pos, acs_orn], axis=2)
 
 

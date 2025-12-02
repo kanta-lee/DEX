@@ -195,17 +195,19 @@ class CLF():
         self._traj_states = {}
 
     def _init_spiral_state(self, env):
-        _spiral_horizon = 60
-        _spiral_turns = 2.0
+        _spiral_horizon = 40
+        _spiral_turns = 1.0
+        _spiral_turns_ori = 1.0
 
         goal = np.asarray(env.goal, dtype=np.float32)
         start = np.asarray(env._get_robot_state(0)[:3], dtype=np.float32)
+        yaw_start = np.asarray(env._get_robot_state(0)[[5]], dtype=np.float32)
         steps = max(_spiral_horizon, 1)
 
         center_xy = 0.5 * (start[:2] + goal[:2])
 
-        r_start = np.linalg.norm(start[:2] - center_xy) + 0.05
-        r_goal = np.linalg.norm(goal[:2] - center_xy) - 0.01
+        r_start = np.linalg.norm(start[:2] - center_xy)+0.05
+        r_goal = np.linalg.norm(goal[:2] - center_xy)+0.05
 
         theta_start = np.arctan2(start[1] - center_xy[1], start[0] - center_xy[0])
         theta_goal = np.arctan2(goal[1] - center_xy[1], goal[0] - center_xy[0])
@@ -215,14 +217,17 @@ class CLF():
         thetas = np.linspace(theta_start, theta_end, steps)
         zs = np.linspace(start[2], goal[2], steps)
 
+        yaw_end = yaw_start + 2 * np.pi * _spiral_turns_ori
+        yaws = np.linspace(yaw_start[0], yaw_end[0], steps)
+
         traj = []
         for k in range(steps):
             x_ref = center_xy[0] + radii[k] * np.cos(thetas[k])
             y_ref = center_xy[1] + radii[k] * np.sin(thetas[k])
-            traj.append([x_ref, y_ref, zs[k]])
+            traj.append([x_ref, y_ref, zs[k], np.remainder(yaws[k]+np.pi, 2 * np.pi)-np.pi])
 
         # Ensure the final point reaches the goal.
-        traj.append(goal.copy())
+        traj.append([goal[0], goal[1], goal[2], (np.remainder(yaw_end+np.pi, 2 * np.pi)-np.pi)[0]])
         traj = np.asarray(traj, dtype=np.float32)
 
         self._traj_states[env.__class__.__name__] = {
@@ -230,6 +235,14 @@ class CLF():
             'start': start,
             'traj': traj,
         }
+
+    def yaw_difference(self, yaw1, yaw2):
+        diff = yaw1 - yaw2
+        while diff > np.pi:
+            diff -= 2 * np.pi
+        while diff < -np.pi:
+            diff += 2 * np.pi
+        return np.abs(diff)
 
     def _get_reference(self, env):
         key = env.__class__.__name__
@@ -331,17 +344,19 @@ class ObjCLF():
     def _init_spiral_state(self, env):
         _spiral_horizon = 60
         _spiral_turns = 1.0
+        _spiral_turns_ori = 1.0
 
         goal = np.asarray(env.goal, dtype=np.float32)
 
-        needle_pos, _ = self.get_left_needle_pos(env)
+        needle_pos, needle_ori = self.get_left_needle_pos(env)
         start = np.asarray(needle_pos, dtype=np.float32)
+        yaw_start = np.asarray(needle_ori[[2]], dtype=np.float32)
         steps = max(_spiral_horizon, 1)
 
         center_xy = 0.5 * (start[:2] + goal[:2])
 
-        r_start = np.linalg.norm(start[:2] - center_xy)
-        r_goal = np.linalg.norm(goal[:2] - center_xy)
+        r_start = np.linalg.norm(start[:2] - center_xy)+0.05
+        r_goal = np.linalg.norm(goal[:2] - center_xy)-0.01
 
         theta_start = np.arctan2(start[1] - center_xy[1], start[0] - center_xy[0])
         theta_goal = np.arctan2(goal[1] - center_xy[1], goal[0] - center_xy[0])
@@ -351,14 +366,17 @@ class ObjCLF():
         thetas = np.linspace(theta_start, theta_end, steps)
         zs = np.linspace(start[2], goal[2], steps)
 
+        yaw_end = yaw_start + 2 * np.pi * _spiral_turns_ori
+        yaws = np.linspace(yaw_start[0], yaw_end[0], steps)
+
         traj = []
         for k in range(steps):
             x_ref = center_xy[0] + radii[k] * np.cos(thetas[k])
             y_ref = center_xy[1] + radii[k] * np.sin(thetas[k])
-            traj.append([x_ref, y_ref, zs[k]])
+            traj.append([x_ref, y_ref, zs[k], np.remainder(yaws[k]+np.pi, 2 * np.pi)-np.pi])
 
         # Ensure the final point reaches the goal.
-        traj.append(goal.copy())
+        traj.append([goal[0], goal[1], goal[2], (np.remainder(yaw_end+np.pi, 2 * np.pi)-np.pi)[0]])
         traj = np.asarray(traj, dtype=np.float32)
 
         self._traj_states[env.__class__.__name__] = {
@@ -366,6 +384,14 @@ class ObjCLF():
             'start': start,
             'traj': traj,
         }
+
+    def yaw_difference(self, yaw1, yaw2):
+        diff = yaw1 - yaw2
+        while diff > np.pi:
+            diff -= 2 * np.pi
+        while diff < -np.pi:
+            diff += 2 * np.pi
+        return np.abs(diff)
 
     def _get_reference(self, env):
         key = env.__class__.__name__
@@ -379,15 +405,25 @@ class ObjCLF():
 
         # Stop fetch ref trajectory after the needle is close to the goal.
         goal = np.asarray(env.goal, dtype=np.float32)
-        needle_pos, _ = self.get_left_needle_pos(env)
+        needle_pos, needle_ori = self.get_left_needle_pos(env)
         needle_left_pos = np.asarray(needle_pos, dtype=np.float32)
-        threshold = getattr(env, 'DISTANCE_THRESHOLD', 0.005) * getattr(env, 'SCALING', 1.0)
-        if np.linalg.norm(needle_left_pos - goal) < threshold:
+        pos_threshold = getattr(env, 'DISTANCE_THRESHOLD', 0.005) * getattr(env, 'SCALING', 1.0)
+        ori_threshold = 0.05
+
+        if (np.linalg.norm(needle_left_pos - goal) < pos_threshold
+            and self.yaw_difference(needle_ori[2], state['traj'][-1][3]) < ori_threshold):
             p_ref = state['traj'][-1]
         # Step forward if close to the current reference point.
-        elif (np.linalg.norm(needle_left_pos - state['traj'][self.traj_idx]) < threshold):
+        elif (np.linalg.norm(needle_left_pos - state['traj'][self.traj_idx][0:3]) < pos_threshold
+              and self.yaw_difference(needle_ori[2], state['traj'][self.traj_idx][3]) < ori_threshold):
             self.traj_idx = min(self.traj_idx + 1, len(state['traj']) - 1)
             p_ref = state['traj'][self.traj_idx]
+            # if the robot yaw is close to the boundary, there will be a jump in angle difference
+            print(needle_ori[2], p_ref[3])
+            if needle_ori[2]-p_ref[3]>np.pi:
+                p_ref[3] += 2*np.pi
+            elif p_ref[3]-needle_ori[2]>np.pi:
+                p_ref[3] -= 2*np.pi
         else:
             p_ref = state['traj'][self.traj_idx]
 
@@ -405,15 +441,20 @@ class ObjCLF():
 
         p_ref_t = torch.from_numpy(p_ref).float().unsqueeze(0).to(self.device)
         needle_left_pos_t = torch.from_numpy(needle_left_pos).float().unsqueeze(0).to(self.device)
+        needle_left_ori_t = torch.from_numpy(needle_left_ori).float().unsqueeze(0).to(self.device)
 
-        with torch.enable_grad():
+        with ((torch.enable_grad())):
             needle_left_pos_t.requires_grad_(True)
-            V = 0.5 * torch.sum((needle_left_pos_t - p_ref_t) ** 2)
+            needle_left_ori_t.requires_grad_(True)
+            V = 0.5 * torch.sum((needle_left_pos_t - p_ref_t[:, 0:3]) ** 2
+                                )+0.5 * torch.sum((needle_left_ori_t[:, [2]] - p_ref_t[:, [3]]) ** 2)
+            # V = 0.5 * torch.sum((needle_left_pos_t - p_ref_t[:, 0:3]) ** 2)
             V.backward()
-            grad_V = needle_left_pos_t.grad.detach()
-            grad_V = torch.concat((grad_V, torch.zeros((1, self.x_dim-3), device=self.device)), dim=1)
+            grad_V = torch.concat((needle_left_pos_t.grad.detach(), needle_left_ori_t.grad.detach()), dim=1)
+            # grad_V = torch.concat((needle_left_pos_t.grad.detach(), torch.zeros((1,3), device=self.device)), dim=1)
 
         needle_left_pos_t.requires_grad_(False)
+        needle_left_ori_t.requires_grad_(False)
 
         obs = np.concatenate((needle_left_pos, needle_left_ori))
         obs_t = torch.from_numpy(obs).float().unsqueeze(0).to(self.device)
