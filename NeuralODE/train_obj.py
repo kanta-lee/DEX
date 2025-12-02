@@ -13,7 +13,8 @@ from node import NeuralODE
 torch.autograd.set_detect_anomaly(True)
 
 TASKS = [
-    'NeedlePick-v0',
+    'NeedlePick-v1',
+    'NeedlePick-v2',
 ]
 
 def setup_argparser() -> argparse.ArgumentParser:
@@ -50,7 +51,7 @@ def load_data(task_name: str, device: torch.device) -> Tuple:
     SCALING = 5.0 # See SurRoL code
     acs_pos = acs_pos * 0.01 * SCALING
 
-    if task_name == 'NeedlePick-v0':
+    if task_name == 'NeedlePick-v1' or task_name == 'NeedlePick-v2':
         # obs_orn: [num_demo, num_timestep, 4] - [roll, pitch, yaw, jaw_angle]
         # Excluding jaw_angle as it's not part of the control space
         obs_orn = obs_orn[:, :, 0:3]
@@ -59,20 +60,8 @@ def load_data(task_name: str, device: torch.device) -> Tuple:
         # jaw_status (0.5: open, -0.5: closed) is excluded as it's a discrete action
         acs_orn = acs_orn[:, :, [0]] * np.deg2rad(30)
 
-        # Concatenate obs_pos with obs_orn and acs_pos with acs_orn
+        # Concatenate obs_pos with obs_orn, obj_pos and acs_pos with acs_orn
         obs = np.concatenate([obs_pos, obs_orn, obj_pos], axis=2)
-        acs = np.concatenate([acs_pos, acs_orn], axis=2)
-    elif task_name == 'NeedlePick-v1' or task_name == 'NeedlePick-v2':
-        # obs_orn: [num_demo, num_timestep, 4] - [roll, pitch, yaw, jaw_angle]
-        # Excluding jaw_angle as it's not part of the control space
-        obs_orn = obs_orn[:, :, 0:3]
-
-        # Using only d_yaw (scaled by 30 degrees to radians) as control input
-        # jaw_status (0.5: open, -0.5: closed) is excluded as it's a discrete action
-        acs_orn = acs_orn[:, :, [0]] * np.deg2rad(30)
-
-        # Concatenate obs_pos with obs_orn and acs_pos with acs_orn
-        obs = np.concatenate([obs_pos, obs_orn], axis=2)
         acs = np.concatenate([acs_pos, acs_orn], axis=2)
     else:
         # GauzeRetrieve-v1 and GauzeRetrieve-v2 have no yaw control.
