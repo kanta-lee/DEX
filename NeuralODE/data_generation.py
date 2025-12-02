@@ -89,14 +89,16 @@ obs[28:31]: Orientation of right end of the needle (Euler angles)
 obs_pos = np.zeros((num_demo, num_timestep, 3))  # [demo, timestep, xyz]
 obs_orn = np.zeros((num_demo, num_timestep, 4))  # [demo, timestep, [roll, pitch, yaw, jaw_angle]]
 
-obj_pos = np.zeros((num_demo, num_timestep, 6))  # [demo, timestep, [leftxyz, rightxyz]]
+obj_pos = np.zeros((num_demo, num_timestep, 3))  # [demo, timestep, leftxyz]
+obj_orn = np.zeros((num_demo, num_timestep, 3))  # [demo, timestep, leftori]
 
 # Extract data from observations using threads for speed
 
 def _process_demo(demo_idx: int):
     demo_obs_pos = np.zeros((num_timestep, 3))
     demo_obs_orn = np.zeros((num_timestep, 4))
-    demo_obj_pos = np.zeros((num_timestep, 6))
+    demo_obj_pos = np.zeros((num_timestep, 3))
+    demo_obj_orn = np.zeros((num_timestep, 3))
 
     for timestep_idx in range(num_timestep):
         obs = obs_data[demo_idx][timestep_idx]['observation']
@@ -104,18 +106,20 @@ def _process_demo(demo_idx: int):
         demo_obs_orn[timestep_idx, :] = obs[3:7]
 
         if args.task in ['NeedlePick-v0', 'NeedlePick-v1', 'NeedlePick-v2']:
-            demo_obj_pos[timestep_idx, :] = obs[[19, 20, 21, 25, 26, 27]]
+            demo_obj_pos[timestep_idx, :] = obs[19:22]
+            demo_obj_orn[timestep_idx, :] = obs[22:25]
 
-    return demo_idx, demo_obs_pos, demo_obs_orn, demo_obj_pos
+    return demo_idx, demo_obs_pos, demo_obs_orn, demo_obj_pos, demo_obj_orn
 
 
 with ThreadPoolExecutor() as executor:
     futures = {executor.submit(_process_demo, demo_idx): demo_idx for demo_idx in range(num_demo)}
     for future in tqdm(as_completed(futures), total=num_demo, desc='demos', unit='demo'):
-        demo_idx, demo_obs_pos, demo_obs_orn, demo_obj_pos = future.result()
+        demo_idx, demo_obs_pos, demo_obs_orn, demo_obj_pos, demo_obj_orn = future.result()
         obs_pos[demo_idx] = demo_obs_pos
         obs_orn[demo_idx] = demo_obs_orn
         obj_pos[demo_idx] = demo_obj_pos
+        obj_orn[demo_idx] = demo_obj_orn
 
 # Save processed data to files
 np.save(f'data/{args.task}/obs_pos.npy', obs_pos)
@@ -123,5 +127,6 @@ np.save(f'data/{args.task}/acs_pos.npy', acs_pos)
 np.save(f'data/{args.task}/obs_orn.npy', obs_orn)
 np.save(f'data/{args.task}/acs_orn.npy', acs_orn)
 np.save(f'data/{args.task}/obj_pos.npy', obj_pos)
+np.save(f'data/{args.task}/obj_orn.npy', obj_orn)
 
 print(f"Data processing completed for {args.task}")

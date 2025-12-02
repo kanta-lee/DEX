@@ -17,7 +17,7 @@ from surrol.tasks.gauze_retrieve_cylinder import GauzeRetrieveCylinder
 
 from NeuralODE.node import NeuralODE
 from CBF.cbf import CBF
-from CLF.clf import PositionCLF, CLF
+from CLF.clf import PositionCLF, CLF, ObjCLF
 
 
 class Sampler:
@@ -50,20 +50,23 @@ class Sampler:
 
         # Initialize Neural ODE
         # the neural ode has dims [x_dim, 64, x_dim + x_dim * u_dim]
-        # position and orientation
-        self.node = NeuralODE([6, 64, 30]).to(self.device)
         # position only
-        # self.node = NeuralODE([3, 64, 12]).to(self.device)
+        self.node = NeuralODE([3, 64, 64, 12]).to(self.device)
 
-        self.node.load_latest_weight(self.cfg.task)
+        self.node.load_latest_weight(self.cfg.task, type='pos_')
         self.node.eval()
 
         # Initialize CBF
         self.cbf = CBF(self.node.net, self.device)
 
+        # position and orientation and obj position
+        self.obj_node = NeuralODE([6, 64, 30]).to(self.device)
+
         # Initialize CLF
         # self.clf = PositionCLF(self.node.net, self.device)
-        self.clf = CLF(self.node.net, self.device)
+        # self.clf = CLF(self.orn_node.net, self.device)
+        self.obj_node.load_latest_weight(self.cfg.task, type='obj_')
+        self.clf = ObjCLF(self.obj_node.net, self.device)
 
 
     def init(self):
@@ -201,8 +204,11 @@ class Sampler:
             if not is_train and self.cfg.use_dclf and isinstance(self._env.env, self.supported_envs):
                 if p_ref is not None:
 
-                    current_dev = (np.linalg.norm(env._get_robot_state(0)[:3]-p_ref[0:3])+
-                                   self.clf.yaw_difference(env._get_robot_state(0)[5], p_ref[3]))
+                    # current_dev = (np.linalg.norm(env._get_robot_state(0)[:3]-p_ref[0:3])+
+                    #                self.clf.yaw_difference(env._get_robot_state(0)[5], p_ref[3]))
+                    needle_pos, needle_ori = self.clf.get_left_needle_pos(env)
+                    current_dev = np.linalg.norm(needle_pos-p_ref)
+                    print(f'current_step {self._episode_step} deviation from ref:', current_dev)
                     deviation.append(current_dev)
 
             # update stored observation

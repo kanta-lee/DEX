@@ -133,11 +133,11 @@ class NeuralODE(nn.Module):
 
         return nn.Sequential(*modules)
 
-    def load_latest_weight(self, task: str):
+    def load_latest_weight(self, task: str, type: str = ''):
         """Load latest weight using absolute path"""
         weights_dir = Path(__file__).parent / "weights" / task
         
-        pattern = str(weights_dir / "model_iter_*.pth")
+        pattern = str(weights_dir / f"model_{type}iter_*.pth")
         weight_files = glob.glob(pattern)
         
         if not weight_files:

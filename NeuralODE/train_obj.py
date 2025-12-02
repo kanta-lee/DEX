@@ -13,6 +13,7 @@ from node import NeuralODE
 torch.autograd.set_detect_anomaly(True)
 
 TASKS = [
+    'NeedlePick-v0',
     'NeedlePick-v1',
     'NeedlePick-v2',
 ]
@@ -22,12 +23,15 @@ def setup_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser('Neural ODE Training Script')
     parser.add_argument('--method', type=str, choices=['dopri8', 'adams'], default='dopri8')
     parser.add_argument('--activation', type=str, choices=['gelu', 'silu', 'tanh'], default='gelu')
+    parser.add_argument('--rtol', type=float, default=1e-3, help='Relative tolerance for ODE solver')
+    parser.add_argument('--atol', type=float, default=1e-4, help='Absolute tolerance for ODE solver')
+    parser.add_argument('--max_num_steps', type=int, default=5000, help='Max steps for adaptive ODE solver')
     parser.add_argument('--task', type=str, choices=TASKS, required=True)
     parser.add_argument('--data_size', type=int, default=100, help="Length of each trajectory's action sequence")
     parser.add_argument('--batch_time', type=int, default=10, help="Length of time steps in a batch")
     parser.add_argument('--batch_size', type=int, default=20, help="Number of trajectory segments in a batch")
     parser.add_argument('--niters', type=int, default=200, help="Number of training epochs")
-    parser.add_argument('--test_freq', type=int, default=20, help="Frequency to run evaluation")
+    parser.add_argument('--test_freq', type=int, default=10, help="Frequency to run evaluation")
     parser.add_argument('--lr', type=float, default=1e-3, help="Learning rate")
     
     return parser
@@ -42,6 +46,7 @@ def load_data(task_name: str, device: torch.device) -> Tuple:
         obs_pos = np.load(f'data/{task_name}/obs_pos.npy')
         acs_pos = np.load(f'data/{task_name}/acs_pos.npy')
         obj_pos = np.load(f'data/{task_name}/obj_pos.npy')
+        obj_orn = np.load(f'data/{task_name}/obj_orn.npy')
     except FileNotFoundError:
         print(f"Error: Data files not found in 'data/{task_name}/'.")
         print("Please ensure the data is correctly placed.")
@@ -51,22 +56,14 @@ def load_data(task_name: str, device: torch.device) -> Tuple:
     SCALING = 5.0 # See SurRoL code
     acs_pos = acs_pos * 0.01 * SCALING
 
-    if task_name == 'NeedlePick-v1' or task_name == 'NeedlePick-v2':
-        # obs_orn: [num_demo, num_timestep, 4] - [roll, pitch, yaw, jaw_angle]
-        # Excluding jaw_angle as it's not part of the control space
-        obs_orn = obs_orn[:, :, 0:3]
+    # Using only d_yaw (scaled by 30 degrees to radians) as control input
+    # jaw_status (0.5: open, -0.5: closed) is excluded as it's a discrete action
+    acs_orn = acs_orn[:, :, [0]] * np.deg2rad(30)
 
-        # Using only d_yaw (scaled by 30 degrees to radians) as control input
-        # jaw_status (0.5: open, -0.5: closed) is excluded as it's a discrete action
-        acs_orn = acs_orn[:, :, [0]] * np.deg2rad(30)
+    # Concatenate obs_pos with obs_orn, obj_pos and acs_pos with acs_orn
+    obs = np.concatenate([obj_pos, obj_orn], axis=2)
+    acs = np.concatenate([acs_pos, acs_orn], axis=2)
 
-        # Concatenate obs_pos with obs_orn, obj_pos and acs_pos with acs_orn
-        obs = np.concatenate([obs_pos, obs_orn, obj_pos], axis=2)
-        acs = np.concatenate([acs_pos, acs_orn], axis=2)
-    else:
-        # GauzeRetrieve-v1 and GauzeRetrieve-v2 have no yaw control.
-        obs = obs_pos
-        acs = acs_pos
 
     # Convert to torch tensor
     obs = torch.from_numpy(obs).float().to(device)
@@ -83,14 +80,11 @@ def load_data(task_name: str, device: torch.device) -> Tuple:
     # Use all but the last trajectory for training
     x_train = x_all[:-1, :, :, :]
     u_train = u_all[:-1, :, :, :]
-
-    # Initial condition for testing
-    x_test0 = x_test[0, :, :] # Shape [1, x_dim]
     
     print(f"Training data: x shape {x_train.shape}, u shape {u_train.shape}")
     print(f"Test data: x shape {x_test.shape}, u shape {u_test.shape}")
 
-    return x_train, u_train, x_test, u_test, x_test0
+    return x_train, u_train, x_test, u_test
 
 
 def get_batch(
@@ -108,17 +102,33 @@ def get_batch(
     u = u_train[bitr, :, :, :]  # [data_size, 1, u_dim]
     x = x_train[bitr, :, :, :]  # [data_size + 1, 1, x_dim]
 
-    # Select random starting time indices
-    s_indices = torch.from_numpy(
-        np.random.choice(
-            np.arange(args.data_size - args.batch_time, dtype=np.int64),
-            args.batch_size - 1, # -1 because we always add index 0
-            replace=False
+    # Find time steps where the object's position changes (starts to move)
+    movement = (x[1:, 0, :] - x[:-1, 0, :]).pow(2).sum(dim=1) > 1e-8  # [data_size]
+    moving_steps = torch.nonzero(movement, as_tuple=False).squeeze(-1)
+    if moving_steps.numel() > 0:
+        first_moving = moving_steps.min()
+        moving_steps = torch.arange(first_moving, x.shape[0], device=u.device)
+    else:
+        moving_steps = torch.tensor([], device=u.device, dtype=torch.long)
+
+    # Valid start indices must allow a full batch_time window
+    max_start = args.data_size - args.batch_time
+    valid_starts = moving_steps[moving_steps <= max_start]
+
+    # Fallback: if no movement detected, use all possible starts
+    if valid_starts.numel() == 0:
+        valid_starts = torch.arange(max_start + 1, device=u.device)
+
+    # Sample start indices from valid set
+    need_unique = args.batch_size - 1
+    replace = valid_starts.numel() < need_unique
+    s = valid_starts[
+        torch.multinomial(
+            torch.ones(valid_starts.numel(), device=u.device),
+            num_samples=need_unique,
+            replacement=replace
         )
-    ).to(u.device)
-    
-    # Always include the start of the trajectory (index 0)
-    s = torch.cat([torch.tensor([0]).to(u.device), s_indices], dim=0)  # [batch_size]
+    ]
     
     batch_x0 = x[s]  # [batch_size, 1, x_dim]
 
@@ -128,7 +138,7 @@ def get_batch(
     batch_indices = s.unsqueeze(0) # [1, batch_size]
     
     # Broadcasting creates [batch_time, batch_size]
-    full_indices = time_indices + batch_indices 
+    full_indices = time_indices + batch_indices
 
     # Gather all data at once
     # u's indices are [0, data_size-1], x's are [0, data_size]
@@ -141,25 +151,36 @@ def get_batch(
 def run_evaluation(
     func: NeuralODE, 
     x_test: Tensor, 
-    u_test: Tensor, 
-    x_test0: Tensor, 
+    u_test: Tensor,
     t_step_vec: Tensor,
-    data_size: int
+    data_size: int,
+    rtol: float,
+    atol: float,
+    max_num_steps: int,
+    method: str
 ):
     """Runs the model over the full test trajectory."""
     
     print("Running evaluation...")
     with torch.no_grad():
-        x0 = x_test0             # Shape [1, x_dim]
+        # find the start index where the obj starts to move
+        movement = (x_test[1:, 0, :] - x_test[:-1, 0, :]).pow(2).sum(dim=1) > 1e-8  # [data_size]
+        moving_steps = torch.nonzero(movement, as_tuple=False).squeeze(-1)
+        start_idx = (moving_steps.min().item()) if moving_steps.numel() > 0 else 0
+
+        x0 = x_test[start_idx, :, :]             # Shape [1, x_dim]
         pred_x_test = x0.unsqueeze(0) # Shape [1, 1, x_dim]
         func.eval()
 
         # Test over the whole test trajectory
-        for i in range(data_size):
+        for i in range(start_idx, data_size):
             func.u = u_test[i, :, :] # Shape [1, u_dim]
             
             # Integrate one time step
-            pred = odeint(func, x0, t_step_vec, method='dopri8') # [2, 1, x_dim]
+            pred = odeint(
+                func, x0, t_step_vec, method=method,
+                rtol=rtol, atol=atol, options={'max_num_steps': max_num_steps}
+            ) # [2, 1, x_dim]
             
             # Get the predicted state at t=0.1
             x_next = pred[-1, :, :] # Shape [1, x_dim]
@@ -175,8 +196,8 @@ def run_evaluation(
             x0 = x_next
 
         # Compute loss against the full ground truth
-        # x_test shape is [data_size + 1, 1, x_dim]
-        test_loss = torch.mean(torch.abs(pred_x_test - x_test))
+        # x_test shape is [data_size-start_idx + 1, 1, x_dim]
+        test_loss = torch.mean(torch.abs(pred_x_test - x_test[start_idx:, :, :]))
         print(f"Evaluation Loss: {test_loss.item():.6f}")
 
 
@@ -191,7 +212,7 @@ def train(args: argparse.Namespace):
     os.makedirs(saved_folder, exist_ok=True) # No need to check if empty
 
     # Load data
-    x_train, u_train, x_test, u_test, x_test0 = load_data(
+    x_train, u_train, x_test, u_test = load_data(
         args.task, device
     )
     
@@ -233,7 +254,11 @@ def train(args: argparse.Namespace):
                 func.u = batch_u[i, :, :, :] # Shape [batch_size, 1, u_dim]
                 
                 # Integrate one step forward
-                pred = odeint(func, x0, t_step_vec, method=args.method)  # [2, batch_size, 1, x_dim]
+                pred = odeint(
+                    func, x0, t_step_vec, method=args.method,
+                    rtol=args.rtol, atol=args.atol,
+                    options={'max_num_steps': args.max_num_steps}
+                )  # [2, batch_size, 1, x_dim]
                 
                 # Get the predicted state at t=0.1
                 x_next = pred[-1, :, :, :]
@@ -262,7 +287,8 @@ def train(args: argparse.Namespace):
         # --- Evaluation ---
         if itr % args.test_freq == 0:
             run_evaluation(
-                func, x_test, u_test, x_test0, t_step_vec, args.data_size
+                func, x_test, u_test, t_step_vec, args.data_size,
+                args.rtol, args.atol, args.max_num_steps, args.method
             )
             # Save weights
             save_path = f'{saved_folder}/model_obj_iter_{itr}.pth'
