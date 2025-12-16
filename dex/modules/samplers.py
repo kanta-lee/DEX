@@ -225,7 +225,7 @@ class Sampler:
             success_file = f"{base_path}/success.txt"
             open(success_file, 'w').close()
         
-        if not is_train and self.cfg.use_dcbf and isinstance(self._env.env, self.supported_envs):
+        if not is_train and (self.cfg.use_dcbf or self.cfg.use_dclf) and isinstance(self._env.env, self.supported_envs):
             # Save action sequence for real world demonstration
             actions = np.array(actions)
             action_filename = f"{base_path}/actions.npy"

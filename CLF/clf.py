@@ -7,6 +7,7 @@ import pybullet as p
 from surrol.utils.pybullet_utils import (
     get_link_pose
 )
+from torch.fx.experimental.unification.unification_tools import first
 
 
 def cvx_solver(P, q, G, h):
@@ -195,39 +196,54 @@ class CLF():
         self._traj_states = {}
 
     def _init_spiral_state(self, env):
+        _line_horizon = 10
+        # initial and middle z bias
+        z_bias_1 = 0.075
+        z_bias_2 = 0.045
+        # TODO: find the needle radius from the env
+        _needle_radius = 0.1
         _spiral_horizon = 40
-        _spiral_turns = 1.0
-        _spiral_turns_ori = 1.0
+        _spiral_turns = 0.5
 
-        goal = np.asarray(env.goal, dtype=np.float32)
         start = np.asarray(env._get_robot_state(0)[:3], dtype=np.float32)
-        yaw_start = np.asarray(env._get_robot_state(0)[[5]], dtype=np.float32)
-        steps = max(_spiral_horizon, 1)
+        goal = np.asarray(env.goal, dtype=np.float32)
 
-        center_xy = 0.5 * (start[:2] + goal[:2])
+        # first stage: move the needle close to the target
+        pos_start = start
+        theta_end = 0.5 * np.pi
+        center = goal + np.array([-_needle_radius, 0.0, z_bias_1])
+        pos_end = np.array([center[0] + _needle_radius * np.cos(theta_end),
+                            center[1] + _needle_radius * np.sin(theta_end),
+                            center[2]])
 
-        r_start = np.linalg.norm(start[:2] - center_xy)+0.05
-        r_goal = np.linalg.norm(goal[:2] - center_xy)+0.05
+        pos = np.linspace(pos_start, pos_end, _line_horizon)
 
-        theta_start = np.arctan2(start[1] - center_xy[1], start[0] - center_xy[0])
-        theta_goal = np.arctan2(goal[1] - center_xy[1], goal[0] - center_xy[0])
-        theta_end = theta_goal + 2 * np.pi * _spiral_turns
+        yaw_start = np.asarray(env._get_robot_state(0)[5], dtype=np.float32)
+        yaw_end = 0.5 * np.pi
 
-        radii = np.linspace(r_start, r_goal, steps)
-        thetas = np.linspace(theta_start, theta_end, steps)
-        zs = np.linspace(start[2], goal[2], steps)
-
-        yaw_end = yaw_start + 2 * np.pi * _spiral_turns_ori
-        yaws = np.linspace(yaw_start[0], yaw_end[0], steps)
+        yaws = np.linspace(yaw_start, yaw_end, _line_horizon)
 
         traj = []
-        for k in range(steps):
-            x_ref = center_xy[0] + radii[k] * np.cos(thetas[k])
-            y_ref = center_xy[1] + radii[k] * np.sin(thetas[k])
+        for k in range(_line_horizon):
+            traj.append([pos[k][0], pos[k][1], pos[k][2], np.remainder(yaws[k]+np.pi, 2 * np.pi)-np.pi])
+
+        # second stage: rotate the needle to pass through the target
+        theta_start_2 = theta_end
+        theta_end_2 = theta_start_2 - 2 * np.pi * _spiral_turns
+        thetas = np.linspace(theta_start_2, theta_end_2, _spiral_horizon)
+
+        yaw_start_2 = yaw_end
+        yaw_end_2 = yaw_start_2 - 2 * np.pi * _spiral_turns
+        yaws = np.linspace(yaw_start_2, yaw_end_2, _spiral_horizon)
+        # first half z
+        zs_1 = np.linspace(goal[2]+z_bias_1, goal[2]+z_bias_2, _spiral_horizon//2)
+        zs_2 = np.linspace(goal[2]+z_bias_2, goal[2]+z_bias_1, _spiral_horizon//2)
+        zs = np.concatenate(([zs_1, zs_2]))
+        for k in range(_spiral_horizon):
+            x_ref = center[0] + _needle_radius * np.cos(thetas[k])
+            y_ref = center[1] + _needle_radius * np.sin(thetas[k])
             traj.append([x_ref, y_ref, zs[k], np.remainder(yaws[k]+np.pi, 2 * np.pi)-np.pi])
 
-        # Ensure the final point reaches the goal.
-        traj.append([goal[0], goal[1], goal[2], (np.remainder(yaw_end+np.pi, 2 * np.pi)-np.pi)[0]])
         traj = np.asarray(traj, dtype=np.float32)
 
         self._traj_states[env.__class__.__name__] = {
@@ -255,13 +271,12 @@ class CLF():
         state = self._traj_states[key]
 
         # Stop fetch ref trajectory after the needle is close to the goal.
-        goal = np.asarray(env.goal, dtype=np.float32)
         robot_state = np.asarray(env._get_robot_state(0), dtype=np.float32)
         psm_pos = robot_state[0:3]
         pos_threshold = getattr(env, 'DISTANCE_THRESHOLD', 0.005) * getattr(env, 'SCALING', 1.0)
         ori_threshold = 0.05
 
-        if (np.linalg.norm(psm_pos - goal) < pos_threshold
+        if (np.linalg.norm(psm_pos - state['traj'][-1][0:3]) < pos_threshold
                 and self.yaw_difference(robot_state[5], state['traj'][-1][3]) < ori_threshold):
             p_ref = state['traj'][-1]
         # Step forward if close to the current reference point.
