@@ -94,7 +94,8 @@ class Sampler:
         base_path = f"saved_eval_pic/{path_type}/{self.cfg.task}/s{self.cfg.seed}/{ep:02}"
         os.makedirs(base_path, exist_ok=True)
         
-        # Store actions for real demo
+        # Store states and actions for real demo
+        states = []
         actions = []
         
         # Log object position in different episodes
@@ -188,6 +189,7 @@ class Sampler:
                     action[3] = modified_action[:, 3].cpu().numpy() / np.deg2rad(30)
 
             # Append final action for real demo
+            states.append(env._get_robot_state(0)[:6])
             actions.append(action)
             
             obs, reward, done, info = self._env.step(action)
@@ -226,11 +228,15 @@ class Sampler:
             open(success_file, 'w').close()
         
         if not is_train and (self.cfg.use_dcbf or self.cfg.use_dclf) and isinstance(self._env.env, self.supported_envs):
-            # Save action sequence for real world demonstration
+            # Save state and action sequence for real world demonstration
+            states.append(env._get_robot_state(0)[:6])
+            states = np.array(states)
             actions = np.array(actions)
             action_filename = f"{base_path}/actions.npy"
+            states_filename = f"{base_path}/states.npy"
             np.save(action_filename, actions)
-            print("Images and actions are saved at", base_path)
+            np.save(states_filename, states)
+            print("Images, states and actions are saved at", base_path)
         
         # make sure episode is marked as done at final time step
         episode[-1].done = True
