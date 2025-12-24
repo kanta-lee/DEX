@@ -203,15 +203,15 @@ class CLF():
         # TODO: find the needle radius from the env
         _needle_radius = 0.1
         _spiral_horizon = 40
-        _spiral_turns = 0.5
+        _spiral_turns = 0.75
 
         start = np.asarray(env._get_robot_state(0)[:3], dtype=np.float32)
         goal = np.asarray(env.goal, dtype=np.float32)
 
         # first stage: move the needle close to the target
         pos_start = start
-        theta_end = 0.5 * np.pi
-        center = goal + np.array([-_needle_radius, 0.0, z_bias_1])
+        theta_end = 0.25 * np.pi
+        center = goal + np.array([_needle_radius, 0.0, z_bias_1])
         pos_end = np.array([center[0] + _needle_radius * np.cos(theta_end),
                             center[1] + _needle_radius * np.sin(theta_end),
                             center[2]])
@@ -219,7 +219,7 @@ class CLF():
         pos = np.linspace(pos_start, pos_end, _line_horizon)
 
         yaw_start = np.asarray(env._get_robot_state(0)[5], dtype=np.float32)
-        yaw_end = 0.5 * np.pi
+        yaw_end = 0.25 * np.pi
 
         yaws = np.linspace(yaw_start, yaw_end, _line_horizon)
 
@@ -229,11 +229,11 @@ class CLF():
 
         # second stage: rotate the needle to pass through the target
         theta_start_2 = theta_end
-        theta_end_2 = theta_start_2 - 2 * np.pi * _spiral_turns
+        theta_end_2 = theta_start_2 + 2 * np.pi * _spiral_turns
         thetas = np.linspace(theta_start_2, theta_end_2, _spiral_horizon)
 
         yaw_start_2 = yaw_end
-        yaw_end_2 = yaw_start_2 - 2 * np.pi * _spiral_turns
+        yaw_end_2 = yaw_start_2 + 2 * np.pi * _spiral_turns
         yaws = np.linspace(yaw_start_2, yaw_end_2, _spiral_horizon)
         # first half z
         zs_1 = np.linspace(goal[2]+z_bias_1, goal[2]+z_bias_2, _spiral_horizon//2)
@@ -263,7 +263,7 @@ class CLF():
     def _get_reference(self, env):
         key = env.__class__.__name__
         if key not in self._traj_states:
-            if key == 'NeedlePick':
+            if key == 'NeedlePickWoundCLF':
                 self._init_spiral_state(env)
             else:
                 raise ValueError("Unsupported environment for CLF, such as no trajectory defined for this env.")
