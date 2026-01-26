@@ -12,6 +12,7 @@ from surrol.tasks.needle_pick import NeedlePick
 from surrol.tasks.needle_pick_sphere import NeedlePickSphere
 from surrol.tasks.needle_pick_cylinder import NeedlePickCylinder
 from surrol.tasks.needle_pick_wound_for_clf import NeedlePickWoundCLF
+from surrol.tasks.needle_pick_lung_clf_cbf import NeedlePickLungCLF
 from surrol.tasks.gauze_retrieve import GauzeRetrieve
 from surrol.tasks.gauze_retrieve_sphere import GauzeRetrieveSphere
 from surrol.tasks.gauze_retrieve_cylinder import GauzeRetrieveCylinder
@@ -47,12 +48,14 @@ class Sampler:
             GauzeRetrieveSphere, 
             NeedlePickCylinder, 
             NeedlePickSphere,
-            NeedlePickWoundCLF
+            NeedlePickWoundCLF,
+            NeedlePickLungCLF
         )
 
         # Initialize Neural ODE
         # the neural ode has dims [x_dim, 64, x_dim + x_dim * u_dim]
-        # position only
+        # position only: x_dim=3, u_dim=3, output=3+3*3=12
+        # self.node = NeuralODE([3, 64, 12]).to(self.device)
         self.node = NeuralODE([3, 64, 64, 12]).to(self.device)
 
         self.node.load_latest_weight(self.cfg.task, type='pos_')
@@ -136,7 +139,32 @@ class Sampler:
                 if violate_constraint:
                     num_violations += 1
                     print(f'Episode {ep:02}: warning: violate the constraint at episode step {self._episode_step}')
+                    
+            # ===============================================================
+            #                  Control Lyapunov Function
+            # ===============================================================
+            # NOTE: Only use CLF during inference
+            if not is_train and self.cfg.use_dclf and isinstance(self._env.env, self.supported_envs):
+                with torch.no_grad():
+                    u_pos = 0.01 * self._env.env.SCALING * action[0:3]
+                    u_ori = action[[3]] * np.deg2rad(30)
 
+                    u = torch.tensor(np.concatenate((u_pos, u_ori))).unsqueeze(0).float().to(self.device)
+
+                    if isinstance(self._env.env, NeedlePickWoundCLF):
+                        env = self._env.env
+                        modified_action, p_ref = self.clf.traj_tracking(u, env)
+                    elif isinstance(self._env.env, NeedlePickLungCLF):
+                        env = self._env.env
+                        modified_action, p_ref = self.clf.traj_tracking_linear(u, env)
+                    elif isinstance(self._env.env, GauzeRetrieve):
+                        env = self._env.env
+                        modified_action, p_ref = self.clf.traj_tracking(u, env)
+                    else:
+                        raise ValueError("Unsupported environment for CLF, such as no CLF defined for this env.")
+                    # Scale back the action before input into gym environment
+                    action[0:3] = modified_action[:, 0:3].cpu().numpy() / (0.01 * self._env.env.SCALING)
+                    action[3] = modified_action[:, 3].cpu().numpy() / np.deg2rad(30)
             # ===============================================================
             #                  Control Barrier Function
             # ===============================================================
@@ -147,6 +175,10 @@ class Sampler:
                     u = torch.tensor(u).unsqueeze(0).float().to(self.device)
 
                     if isinstance(self._env.env, NeedlePickSphere):
+                        env = self._env.env
+                        modified_action = self.cbf.needle_pick_sphere(u, env)
+
+                    elif isinstance(self._env.env, NeedlePickLungCLF):
                         env = self._env.env
                         modified_action = self.cbf.needle_pick_sphere(u, env)
                         
@@ -167,32 +199,11 @@ class Sampler:
                     # Scale back the action before input into gym environment
                     action[0:3] = modified_action.cpu().numpy() / (0.01 * self._env.env.SCALING)
 
-            # ===============================================================
-            #                  Control Lyapunov Function
-            # ===============================================================
-            # NOTE: Only use CLF during inference
-            if not is_train and self.cfg.use_dclf and isinstance(self._env.env, self.supported_envs):
-                with torch.no_grad():
-                    u_pos = 0.01 * self._env.env.SCALING * action[0:3]
-                    u_ori = action[[3]] * np.deg2rad(30)
 
-                    u = torch.tensor(np.concatenate((u_pos, u_ori))).unsqueeze(0).float().to(self.device)
-
-                    if isinstance(self._env.env, NeedlePickWoundCLF):
-                        env = self._env.env
-                        modified_action, p_ref = self.clf.traj_tracking(u, env)
-                    elif isinstance(self._env.env, GauzeRetrieve):
-                        env = self._env.env
-                        modified_action, p_ref = self.clf.traj_tracking(u, env)
-                    else:
-                        raise ValueError("Unsupported environment for CLF, such as no CLF defined for this env.")
-                    # Scale back the action before input into gym environment
-                    action[0:3] = modified_action[:, 0:3].cpu().numpy() / (0.01 * self._env.env.SCALING)
-                    action[3] = modified_action[:, 3].cpu().numpy() / np.deg2rad(30)
-
-            # Append final action for real demo
-            states.append(env._get_robot_state(0)[:6])
-            actions.append(action)
+            # Append final action for real demo (only when CBF/CLF is used)
+            if not is_train and (self.cfg.use_dcbf or self.cfg.use_dclf):
+                states.append(self._env.env._get_robot_state(0)[:6])
+                actions.append(action)
             
             obs, reward, done, info = self._env.step(action)
             episode.append(AttrDict(

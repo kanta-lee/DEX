@@ -195,6 +195,33 @@ class CLF():
 
         self._traj_states = {}
 
+    def _init_linear_state(self, env):
+        """Initialize a simple linear trajectory from start to goal."""
+        _line_horizon = 50  # Number of waypoints for linear trajectory
+
+        start = np.asarray(env._get_robot_state(0)[:3], dtype=np.float32)
+        goal = np.asarray(env.goal, dtype=np.float32)
+
+        # Linear interpolation from start to goal
+        pos = np.linspace(start, goal, _line_horizon)
+
+        # Keep yaw constant (or interpolate if needed)
+        yaw_start = np.asarray(env._get_robot_state(0)[5], dtype=np.float32)
+        yaw_goal = yaw_start  # Keep same yaw, or set to desired value
+        yaws = np.linspace(yaw_start, yaw_goal, _line_horizon)
+
+        traj = []
+        for k in range(_line_horizon):
+            traj.append([pos[k][0], pos[k][1], pos[k][2], np.remainder(yaws[k]+np.pi, 2 * np.pi)-np.pi])
+
+        traj = np.asarray(traj, dtype=np.float32)
+
+        self._traj_states[env.__class__.__name__] = {
+            'goal': goal,
+            'start': start,
+            'traj': traj,
+        }
+
     def _init_spiral_state(self, env):
         _line_horizon = 10
         # initial and middle z bias
@@ -210,7 +237,8 @@ class CLF():
 
         # first stage: move the needle close to the target
         pos_start = start
-        theta_end = 0.25 * np.pi
+        # theta_end = 0.25 * np.pi
+        theta_end = np.pi / 2
         center = goal + np.array([_needle_radius, 0.0, z_bias_1])
         pos_end = np.array([center[0] + _needle_radius * np.cos(theta_end),
                             center[1] + _needle_radius * np.sin(theta_end),
@@ -219,7 +247,8 @@ class CLF():
         pos = np.linspace(pos_start, pos_end, _line_horizon)
 
         yaw_start = np.asarray(env._get_robot_state(0)[5], dtype=np.float32)
-        yaw_end = 0.25 * np.pi
+        # yaw_end = 0.25 * np.pi
+        yaw_end = theta_end
 
         yaws = np.linspace(yaw_start, yaw_end, _line_horizon)
 
@@ -265,6 +294,8 @@ class CLF():
         if key not in self._traj_states:
             if key == 'NeedlePickWoundCLF':
                 self._init_spiral_state(env)
+            elif key == 'NeedlePickLungCLF':
+                self._init_linear_state(env)
             else:
                 raise ValueError("Unsupported environment for CLF, such as no trajectory defined for this env.")
             self.traj_idx = 0
@@ -294,6 +325,45 @@ class CLF():
 
         return p_ref
 
+
+    @torch.no_grad()
+    def traj_tracking_linear(self, u, env):
+        """Linear trajectory tracking without needle grasping check."""
+        p_ref = self._get_reference(env)
+        psm_pos_ori = env._get_robot_state(0)[:6]
+
+        p_ref_t = torch.from_numpy(p_ref).float().unsqueeze(0).to(self.device)
+        psm_pos_ori_t = torch.from_numpy(psm_pos_ori).float().unsqueeze(0).to(self.device)
+
+        with torch.enable_grad():
+            psm_pos_ori_t.requires_grad_(True)
+            V = 0.5 * torch.sum((torch.concat((psm_pos_ori_t[:, :3], psm_pos_ori_t[:, [5]]), dim=1) - p_ref_t) ** 2)
+            V.backward()
+            grad_V = psm_pos_ori_t.grad.detach()
+
+        psm_pos_ori_t.requires_grad_(False)
+
+        net_out = self.net(psm_pos_ori_t)
+        fx = net_out[:, :self.x_dim]
+        gx = net_out[:, self.x_dim:]
+        gx = torch.reshape(gx, (self.u_dim, self.x_dim))
+
+        LfV = grad_V @ fx.T
+        LgV = grad_V @ gx.T
+
+        epsilon = 20.0
+        G = LgV.to(self.device)
+        h = (-epsilon * V - LfV).to(self.device)
+        P = torch.eye(self.u_dim).to(self.device)
+        q = torch.zeros(self.u_dim)
+
+        try:
+            modified_u = cvx_solver(P.double(), q.double(), G.double(), h.double())
+            modified_u = torch.from_numpy(modified_u).float().to(self.device).reshape(1, -1)
+        except Exception:
+            modified_u = u
+
+        return modified_u, p_ref
 
     @torch.no_grad()
     def traj_tracking(self, u, env):
