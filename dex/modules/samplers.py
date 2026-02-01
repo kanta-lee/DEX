@@ -15,6 +15,7 @@ from surrol.tasks.needle_pick_wound_for_clf import NeedlePickWoundCLF
 from surrol.tasks.gauze_retrieve import GauzeRetrieve
 from surrol.tasks.gauze_retrieve_sphere import GauzeRetrieveSphere
 from surrol.tasks.gauze_retrieve_cylinder import GauzeRetrieveCylinder
+from surrol.tasks.needle_reach_sphere_obstacle import NeedleReach as NeedleReachSphere
 
 from NeuralODE.node import NeuralODE
 from CBF.cbf import CBF
@@ -47,28 +48,31 @@ class Sampler:
             GauzeRetrieveSphere, 
             NeedlePickCylinder, 
             NeedlePickSphere,
-            NeedlePickWoundCLF
+            NeedlePickWoundCLF,
+            NeedleReachSphere
         )
 
-        # Initialize Neural ODE
-        # the neural ode has dims [x_dim, 64, x_dim + x_dim * u_dim]
-        # position only
-        self.node = NeuralODE([3, 64, 64, 12]).to(self.device)
+        if self.cfg.use_dcbf:
 
-        self.node.load_latest_weight(self.cfg.task, type='pos_')
-        self.node.eval()
+            # Initialize Neural ODE
+            # the neural ode has dims [x_dim, 64, x_dim + x_dim * u_dim]
+            # position only
+            self.node = NeuralODE([3, 64, 12]).to(self.device)
 
-        # Initialize CBF
-        self.cbf = CBF(self.node.net, self.device)
+            self.node.load_latest_weight(self.cfg.task, type='pos_')
+            self.node.eval()
 
-        # position and orientation and obj position
-        self.pos_ori_node = NeuralODE([6, 64, 30]).to(self.device)
+            # Initialize CBF
+            self.cbf = CBF(self.node.net, self.device)
+        if  self.cfg.use_dclf:
+            # position and orientation and obj position
+            self.pos_ori_node = NeuralODE([6, 64, 30]).to(self.device)
 
-        # Initialize CLF
-        # self.clf = PositionCLF(self.node.net, self.device)
-        # self.clf = CLF(self.orn_node.net, self.device)
-        self.pos_ori_node.load_latest_weight(self.cfg.task, type='')
-        self.clf = CLF(self.pos_ori_node.net, self.device)
+            # Initialize CLF
+            # self.clf = PositionCLF(self.node.net, self.device)
+            # self.clf = CLF(self.orn_node.net, self.device)
+            self.pos_ori_node.load_latest_weight(self.cfg.task, type='')
+            self.clf = CLF(self.pos_ori_node.net, self.device)
 
 
     def init(self):
@@ -146,21 +150,12 @@ class Sampler:
                     u = 0.01 * self._env.env.SCALING * action[0:3]
                     u = torch.tensor(u).unsqueeze(0).float().to(self.device)
 
-                    if isinstance(self._env.env, NeedlePickSphere):
+                    if isinstance(self._env.env, NeedlePickSphere) or isinstance(self._env.env, NeedleReachSphere) or isinstance(self._env.env, GauzeRetrieveSphere):
                         env = self._env.env
-                        modified_action = self.cbf.needle_pick_sphere(u, env)
-                        
-                    elif isinstance(self._env.env, NeedlePickCylinder):
+                        modified_action = self.cbf.sphere(u, env)
+                    elif isinstance(self._env.env, NeedlePickCylinder) or isinstance(self._env.env, GauzeRetrieveCylinder):
                         env = self._env.env
-                        modified_action = self.cbf.needle_pick_cylinder(u, env)
-                        
-                    elif isinstance(self._env.env, GauzeRetrieveSphere):
-                        env = self._env.env
-                        modified_action = self.cbf.gauze_retrieve_sphere(u, env)
-                        
-                    elif isinstance(self._env.env, GauzeRetrieveCylinder):
-                        env = self._env.env
-                        modified_action = self.cbf.gauze_retrieve_cylinder(u, env)
+                        modified_action = self.cbf.cylinder(u, env)
                     else:
                         raise ValueError("Unsupported environment for CBF, such as no constraints defined for this env.")
                     

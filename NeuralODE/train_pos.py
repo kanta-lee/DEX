@@ -16,7 +16,10 @@ TASKS = [
     'NeedlePick-v1',
     'NeedlePick-v2',
     'GauzeRetrieve-v1',
-    'GauzeRetrieve-v2'
+    'GauzeRetrieve-v2',
+    'NeedleReach-v0',
+    'PegTransfer-v0',
+    'NeedlePick-v7'
 ]
 
 def setup_argparser() -> argparse.ArgumentParser:
@@ -25,7 +28,7 @@ def setup_argparser() -> argparse.ArgumentParser:
     parser.add_argument('--method', type=str, choices=['dopri8', 'adams'], default='dopri8')
     parser.add_argument('--activation', type=str, choices=['gelu', 'silu', 'tanh'], default='gelu')
     parser.add_argument('--task', type=str, choices=TASKS, required=True)
-    parser.add_argument('--data_size', type=int, default=100, help="Length of each trajectory's action sequence")
+    parser.add_argument('--data_size', type=int, default=50, help="Length of each trajectory's action sequence")
     parser.add_argument('--batch_time', type=int, default=10, help="Length of time steps in a batch")
     parser.add_argument('--batch_size', type=int, default=20, help="Number of trajectory segments in a batch")
     parser.add_argument('--niters', type=int, default=200, help="Number of training epochs")
