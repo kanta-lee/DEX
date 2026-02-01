@@ -15,7 +15,7 @@ from surrol.tasks.needle_pick_wound_for_clf import NeedlePickWoundCLF
 from surrol.tasks.gauze_retrieve import GauzeRetrieve
 from surrol.tasks.gauze_retrieve_sphere import GauzeRetrieveSphere
 from surrol.tasks.gauze_retrieve_cylinder import GauzeRetrieveCylinder
-from surrol.tasks.needle_reach_sphere_obstacle import NeedleReach as NeedleReachSphere
+from surrol.tasks.needle_reach_sphere import NeedleReach as NeedleReachSphere
 
 from NeuralODE.node import NeuralODE
 from CBF.cbf import CBF
@@ -224,7 +224,7 @@ class Sampler:
             success_file = f"{base_path}/success.txt"
             open(success_file, 'w').close()
         
-        if not is_train and (self.cfg.use_dcbf or self.cfg.use_dclf) and isinstance(self._env.env, self.supported_envs):
+        if not is_train and isinstance(self._env.env, self.supported_envs):
             # Save state and action sequence for real world demonstration
             states.append(env._get_robot_state(0)[:6])
             states = np.array(states)
