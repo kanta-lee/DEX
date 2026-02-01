@@ -3,11 +3,6 @@ import torch
 from cvxopt import solvers
 from cvxopt.base import matrix
 
-from surrol.tasks.gauze_retrieve_sphere import GauzeRetrieveSphere
-from surrol.tasks.needle_pick_sphere import NeedlePickSphere
-from surrol.tasks.gauze_retrieve_liver import GauzeRetrieveCylinder
-from surrol.tasks.needle_pick_liver import NeedlePickCylinder
-
 
 def qp_solver(P, q, G, h):
     mat_P = matrix(P.cpu().numpy())
@@ -33,7 +28,7 @@ class CBF():
     def sphere(
         self,
         u: torch.Tensor,
-        env: NeedlePickSphere,
+        env,
     ) -> torch.Tensor:
         psm_pos = env._get_robot_state(0)[:3]
         center, radius = env.get_sphere_prop()
@@ -74,7 +69,7 @@ class CBF():
     def cylinder(
         self,
         u: torch.Tensor,
-        env: NeedlePickCylinder,
+        env,
     ) -> torch.Tensor:
         psm_pos = env._get_robot_state(0)[:3]
         cyl_center, cyl_axis, cyl_length, cyl_radius = env.get_cylinder_prop()
@@ -86,41 +81,32 @@ class CBF():
         
         with torch.enable_grad():
             psm_pos.requires_grad_(True)
-            
-            # --- 1. Define Cylinder Top Plane ---
-            # We define the top plane by a point on it (cyl_top_center)
-            # and its normal vector (cyl_axis).
-            cyl_top_center = cyl_center + cyl_length * cyl_axis
 
-            # --- 2. Calculate Vertical Barrier (b_vertical) ---
-            # This is the signed linear distance from psm_pos to the top plane.
-            # We calculate this using the dot product, as defined in the paper.
-            # b_vertical > 0 if psm is "above" the plane (in the direction of cyl_axis)
-            # b_vertical < 0 if psm is "below" the plane (unsafe region)
-            vec_to_top = psm_pos - cyl_top_center
-            
-            # Use .squeeze() to make the tensors 1D (shape [3]) for torch.dot
-            b_vertical = torch.dot(vec_to_top.squeeze(), cyl_axis.squeeze())
+            # --- 1. Calculate Axial Barrier (b_axial) ---
+            # Linear distance along the axis relative to the cylinder center.
+            # b_axial > 0 if psm is above the top or below the bottom plane.
+            axial = torch.dot((psm_pos - cyl_center).squeeze(), cyl_axis.squeeze())
+            b_axial = torch.abs(axial) - cyl_length / 2.0
 
-            # --- 3. Calculate Radial Barrier (b_radial) ---
-            # This is the squared perpendicular distance from psm_pos to the axis,
-            # minus the squared radius.
+            # --- 2. Calculate Radial Barrier (b_radial) ---
+            # Linear perpendicular distance from the axis minus the radius.
             # b_radial > 0 if psm is outside the radius.
-            # b_radial < 0 if psm is inside the radius (unsafe region).
             vec_from_axis_point = psm_pos - cyl_center
-            radial_dist_sq = torch.linalg.cross(vec_from_axis_point, cyl_axis).norm().pow(2)
-            b_radial = radial_dist_sq - cyl_radius ** 2
+            radial_dist = torch.linalg.cross(vec_from_axis_point, cyl_axis).norm()
+            b_radial = radial_dist - cyl_radius
 
-            # --- 4. Combine Barriers with torch.max ---
-            # The robot is safe if EITHER b_vertical >= 0 OR b_radial >= 0.
+            # --- 3. Combine Barriers with torch.max ---
+            # The robot is safe if ANY of the following is true:
+            # - above/below the cylinder caps, or
+            # - outside the radius.
             # torch.max() implements this "OR" logic differentiably.
-            # b will only be negative if *both* are negative (inside radius AND below top).
-            b = torch.max(b_vertical, b_radial)
+            # b will only be negative if inside radius AND between planes.
+            b = torch.max(torch.stack([b_axial, b_radial]))
 
             # --- 5. Compute Gradient ---
             # Backpropagate from the final combined barrier 'b'.
             # PyTorch automatically routes the gradient through the
-            # correct function (b_vertical or b_radial) that was the max.
+            # correct function (b_axial or b_radial) that was the max.
             if b.grad_fn:
                 # Clear old gradients before backward pass
                 if psm_pos.grad is not None:

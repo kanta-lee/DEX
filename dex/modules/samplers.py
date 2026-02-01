@@ -16,6 +16,7 @@ from surrol.tasks.gauze_retrieve import GauzeRetrieve
 from surrol.tasks.gauze_retrieve_sphere import GauzeRetrieveSphere
 from surrol.tasks.gauze_retrieve_cylinder import GauzeRetrieveCylinder
 from surrol.tasks.needle_reach_sphere import NeedleReach as NeedleReachSphere
+from surrol.tasks.needle_reach_plate_obstacle import NeedleReach as NeedleReachPlate
 
 from NeuralODE.node import NeuralODE
 from CBF.cbf import CBF
@@ -49,7 +50,8 @@ class Sampler:
             NeedlePickCylinder, 
             NeedlePickSphere,
             NeedlePickWoundCLF,
-            NeedleReachSphere
+            NeedleReachSphere,
+            NeedleReachPlate
         )
 
         if self.cfg.use_dcbf:
@@ -153,7 +155,7 @@ class Sampler:
                     if isinstance(self._env.env, NeedlePickSphere) or isinstance(self._env.env, NeedleReachSphere) or isinstance(self._env.env, GauzeRetrieveSphere):
                         env = self._env.env
                         modified_action = self.cbf.sphere(u, env)
-                    elif isinstance(self._env.env, NeedlePickCylinder) or isinstance(self._env.env, GauzeRetrieveCylinder):
+                    elif isinstance(self._env.env, NeedlePickCylinder) or isinstance(self._env.env, GauzeRetrieveCylinder) or isinstance(self._env.env, NeedleReachPlate):
                         env = self._env.env
                         modified_action = self.cbf.cylinder(u, env)
                     else:
