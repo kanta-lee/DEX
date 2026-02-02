@@ -30,7 +30,9 @@ TASKS = [
     'NeedlePick-v1', 
     'NeedlePick-v2', 
     'GauzeRetrieve-v1', 
-    'GauzeRetrieve-v2'
+    'GauzeRetrieve-v2',
+    'NeedleReach-v0',
+    'PegTransfer-v0'
 ]
 
 parser = argparse.ArgumentParser('Training Data Generation for Neural ODE')
