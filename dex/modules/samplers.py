@@ -17,10 +17,12 @@ from surrol.tasks.gauze_retrieve_sphere import GauzeRetrieveSphere
 from surrol.tasks.gauze_retrieve_cylinder import GauzeRetrieveCylinder
 from surrol.tasks.needle_reach_sphere import NeedleReach as NeedleReachSphere
 from surrol.tasks.needle_reach_plate_obstacle import NeedleReach as NeedleReachPlate
+from surrol.tasks.peg_transfer_sphere_obstacle import PegTransfer as PegTransferSphere
+from surrol.tasks.peg_transfer_plate_obstacle import PegTransfer as PegTransferPlate
 
 from NeuralODE.node import NeuralODE
 from CBF.cbf import CBF
-from CLF.clf import PositionCLF, CLF, ObjCLF
+from CLF.clf import CLF
 
 
 class Sampler:
@@ -51,7 +53,9 @@ class Sampler:
             NeedlePickSphere,
             NeedlePickWoundCLF,
             NeedleReachSphere,
-            NeedleReachPlate
+            NeedleReachPlate,
+            PegTransferSphere,
+            PegTransferPlate
         )
 
         if self.cfg.use_dcbf:
@@ -152,10 +156,10 @@ class Sampler:
                     u = 0.01 * self._env.env.SCALING * action[0:3]
                     u = torch.tensor(u).unsqueeze(0).float().to(self.device)
 
-                    if isinstance(self._env.env, NeedlePickSphere) or isinstance(self._env.env, NeedleReachSphere) or isinstance(self._env.env, GauzeRetrieveSphere):
+                    if isinstance(self._env.env, NeedlePickSphere) or isinstance(self._env.env, NeedleReachSphere) or isinstance(self._env.env, GauzeRetrieveSphere) or isinstance(self._env.env, PegTransferSphere):
                         env = self._env.env
                         modified_action = self.cbf.sphere(u, env)
-                    elif isinstance(self._env.env, NeedlePickCylinder) or isinstance(self._env.env, GauzeRetrieveCylinder) or isinstance(self._env.env, NeedleReachPlate):
+                    elif isinstance(self._env.env, NeedlePickCylinder) or isinstance(self._env.env, GauzeRetrieveCylinder) or isinstance(self._env.env, NeedleReachPlate) or isinstance(self._env.env, PegTransferPlate):
                         env = self._env.env
                         modified_action = self.cbf.cylinder(u, env)
                     else:

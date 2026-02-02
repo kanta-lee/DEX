@@ -15,6 +15,10 @@ git pull
 2. NeedlePick-v2 (Sphere Obstacle)
 3. GauzeRetrieve-v1 (Cylinder Obstacle)
 4. GauzeRetrieve-v2 (Sphere Obstacle)
+5. NeedleReach-v1 (Sphere Obstacle)
+6. NeedleReach-v3 (Plate Obstacle)
+7. PegTransfer-v1 (Sphere Obstacle)
+8. PegTransfer-v3 (Plate Obstacle)
 
 
 ## Evaluation
