@@ -388,8 +388,7 @@ class CLF():
         # initial and middle z bias
         z_bias_1 = 0.075
         z_bias_2 = 0.045
-        # TODO: find the needle radius from the env
-        _needle_radius = 0.1
+        _needle_radius = 0.07
         _spiral_horizon = 40
         _spiral_turns = 0.75
 
@@ -521,7 +520,6 @@ class CLF():
 
         LfV = grad_V @ fx.T
         LgV = grad_V @ gx.T
-
         epsilon = 20.0
         G = LgV.to(self.device)
         h = (-epsilon * V - LfV).to(self.device)
