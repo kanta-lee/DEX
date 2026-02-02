@@ -13,6 +13,8 @@ from surrol.tasks.needle_pick_sphere import NeedlePickSphere
 from surrol.tasks.needle_pick_cylinder import NeedlePickCylinder
 from surrol.tasks.needle_pick_wound_for_clf import NeedlePickWoundCLF
 from surrol.tasks.needle_pick_lung_clf_cbf import NeedlePickLungCLF
+from surrol.tasks.needle_pick_trajectory_clf import NeedlePickTrajectoryCLF
+from surrol.tasks.needle_pick_trajectory_cbf import NeedlePickTrajectoryCBF
 from surrol.tasks.gauze_retrieve import GauzeRetrieve
 from surrol.tasks.gauze_retrieve_sphere import GauzeRetrieveSphere
 from surrol.tasks.gauze_retrieve_cylinder import GauzeRetrieveCylinder
@@ -49,7 +51,9 @@ class Sampler:
             NeedlePickCylinder, 
             NeedlePickSphere,
             NeedlePickWoundCLF,
-            NeedlePickLungCLF
+            NeedlePickLungCLF,
+            NeedlePickTrajectoryCLF,
+            NeedlePickTrajectoryCBF
         )
 
         # Initialize Neural ODE
@@ -71,7 +75,14 @@ class Sampler:
         # self.clf = PositionCLF(self.node.net, self.device)
         # self.clf = CLF(self.orn_node.net, self.device)
         self.pos_ori_node.load_latest_weight(self.cfg.task, type='')
-        self.clf = CLF(self.pos_ori_node.net, self.device)
+        traj_type = getattr(self.cfg, 'traj_type', 'line')  # Default to 'line' if not specified
+        self.clf = CLF(self.pos_ori_node.net, self.device, traj_type=traj_type)
+        print(f'CLF initialized with traj_type: {traj_type}')
+        
+        # Sync traj_type to environment for obstacle placement
+        if isinstance(self._env.env, NeedlePickTrajectoryCBF):
+            self._env.env.TRAJ_TYPE = traj_type
+            print(f'Environment TRAJ_TYPE set to: {traj_type}')
 
 
     def init(self):
@@ -88,9 +99,10 @@ class Sampler:
         
         # Store number of violations
         num_violations = 0
-
-        # Store deviation from the CLF trajectory
         deviation = []
+        cbf_triggered_steps = 0
+        cbf_deviation = []
+        clf_deviation = []
         
         # Determine path type
         path_type = "CLF" if self.cfg.use_dclf else "CBF" if self.cfg.use_dcbf else "NONE"
@@ -157,6 +169,12 @@ class Sampler:
                     elif isinstance(self._env.env, NeedlePickLungCLF):
                         env = self._env.env
                         modified_action, p_ref = self.clf.traj_tracking_linear(u, env)
+                    elif isinstance(self._env.env, NeedlePickTrajectoryCLF):
+                        env = self._env.env
+                        modified_action, p_ref = self.clf.traj_tracking_linear(u, env)
+                    elif isinstance(self._env.env, NeedlePickTrajectoryCBF):
+                        env = self._env.env
+                        modified_action, p_ref = self.clf.traj_tracking_linear(u, env)
                     elif isinstance(self._env.env, GauzeRetrieve):
                         env = self._env.env
                         modified_action, p_ref = self.clf.traj_tracking(u, env)
@@ -169,9 +187,11 @@ class Sampler:
             #                  Control Barrier Function
             # ===============================================================
             # NOTE: Only use CBF during inference
+            cbf_triggered = False  # Track if CBF modified the action
             if not is_train and self.cfg.use_dcbf and isinstance(self._env.env, self.supported_envs):
                 with torch.no_grad():
                     u = 0.01 * self._env.env.SCALING * action[0:3]
+                    u_original = u.copy()
                     u = torch.tensor(u).unsqueeze(0).float().to(self.device)
 
                     if isinstance(self._env.env, NeedlePickSphere):
@@ -181,7 +201,15 @@ class Sampler:
                     elif isinstance(self._env.env, NeedlePickLungCLF):
                         env = self._env.env
                         modified_action = self.cbf.needle_pick_sphere(u, env)
-                        
+                    
+                    elif isinstance(self._env.env, NeedlePickTrajectoryCLF):
+                        env = self._env.env
+                        modified_action = self.cbf.needle_pick_sphere(u, env)
+
+                    elif isinstance(self._env.env, NeedlePickTrajectoryCBF):
+                        env = self._env.env
+                        modified_action = self.cbf.needle_pick_sphere(u, env)
+
                     elif isinstance(self._env.env, NeedlePickCylinder):
                         env = self._env.env
                         modified_action = self.cbf.needle_pick_cylinder(u, env)
@@ -196,8 +224,13 @@ class Sampler:
                     else:
                         raise ValueError("Unsupported environment for CBF, such as no constraints defined for this env.")
                     
+                    # Check if CBF actually modified the action
+                    modified_action_np = modified_action.cpu().numpy()
+                    if not np.allclose(u_original, modified_action_np, atol=1e-3):
+                        cbf_triggered = True
+                        cbf_triggered_steps += 1
                     # Scale back the action before input into gym environment
-                    action[0:3] = modified_action.cpu().numpy() / (0.01 * self._env.env.SCALING)
+                    action[0:3] = modified_action_np / (0.01 * self._env.env.SCALING)
 
 
             # Append final action for real demo (only when CBF/CLF is used)
@@ -218,22 +251,107 @@ class Sampler:
             # record deviation
             if not is_train and self.cfg.use_dclf and isinstance(self._env.env, self.supported_envs):
                 if p_ref is not None:
-
-                    current_dev = (np.linalg.norm(env._get_robot_state(0)[:3]-p_ref[0:3])+
-                                   self.clf.yaw_difference(env._get_robot_state(0)[5], p_ref[3]))
-                    # needle_pos, needle_ori = self.clf.get_left_needle_pos(env)
-                    # current_dev = np.linalg.norm(needle_pos-p_ref[0:3])+self.clf.yaw_difference(needle_ori[2], p_ref[3])
-                    # print(f'current_step {self._episode_step} deviation from ref:', current_dev,
-                    #       np.linalg.norm(needle_pos-p_ref[0:3]), self.clf.yaw_difference(needle_ori[2], p_ref[3]))
-                    # print('Current position and yaw:', needle_pos, needle_ori[2])
-                    # print('Reference position and yaw:', p_ref[0:3], p_ref[3])
+                    current_pos = env._get_robot_state(0)[:3]
+                    traj_key = env.__class__.__name__
+                    
+                    # 如果 CBF 触发了修改，计算到小球表面的距离
+                    if cbf_triggered and hasattr(env, 'get_sphere_prop'):
+                        sphere_center, sphere_radius = env.get_sphere_prop()
+                        dist_to_center = np.linalg.norm(current_pos - sphere_center)
+                        current_dev = dist_to_center - sphere_radius
+                        # 如果在球内部，距离为负，取绝对值或设为0
+                        current_dev = max(0, current_dev)
+                        cbf_deviation.append(current_dev)
+                    elif self.cfg.use_new_deviation and traj_key in self.clf._traj_states:
+                        traj_state = self.clf._traj_states[traj_key]
+                        traj_type = traj_state.get('traj_type', 'line')
+                        start_pos = traj_state['start']
+                        goal_pos = traj_state['goal']
+                        
+                        if traj_type == 'line':
+                            # 直线轨迹: Point-to-line distance
+                            line_vec = goal_pos - start_pos
+                            line_len = np.linalg.norm(line_vec)
+                            if line_len > 1e-6:
+                                line_unit = line_vec / line_len
+                                point_vec = current_pos - start_pos
+                                proj_len = np.dot(point_vec, line_unit)
+                                proj_len = np.clip(proj_len, 0, line_len)
+                                closest_point = start_pos + proj_len * line_unit
+                                current_dev = np.linalg.norm(current_pos - closest_point)
+                            else:
+                                current_dev = np.linalg.norm(current_pos - start_pos)
+                                
+                        elif traj_type == 'circle':
+                            # 圆形轨迹: Distance to circle = |distance_to_center - radius|
+                            circle_params = traj_state['circle_params']
+                            center_xy = circle_params['center_xy']
+                            radius = circle_params['radius']
+                            z_center = circle_params['z_center']
+                            
+                            # Distance in XY plane from center
+                            dist_to_center_xy = np.linalg.norm(current_pos[:2] - center_xy)
+                            # Radial deviation (distance from the circle in XY plane)
+                            radial_dev = np.abs(dist_to_center_xy - radius)
+                            # Z deviation (distance from the z plane of the circle)
+                            z_dev = np.abs(current_pos[2] - z_center)
+                            # Total deviation
+                            current_dev = np.sqrt(radial_dev**2 + z_dev**2)
+                            
+                        elif traj_type == 'triangle':
+                            # 三角形轨迹: Minimum distance to any of the three edges
+                            vertices = traj_state['triangle_vertices']
+                            # Triangle has 3 edges: start->v1, v1->v2, v2->goal
+                            edges = [
+                                (vertices[0], vertices[1]),  # start -> vertex1
+                                (vertices[1], vertices[2]),  # vertex1 -> vertex2
+                                (vertices[2], vertices[3]),  # vertex2 -> goal
+                            ]
+                            
+                            min_dist = float('inf')
+                            for p1, p2 in edges:
+                                # Calculate point-to-segment distance
+                                edge_vec = p2 - p1
+                                edge_len = np.linalg.norm(edge_vec)
+                                if edge_len > 1e-6:
+                                    edge_unit = edge_vec / edge_len
+                                    point_vec = current_pos - p1
+                                    proj_len = np.dot(point_vec, edge_unit)
+                                    proj_len = np.clip(proj_len, 0, edge_len)
+                                    closest_point = p1 + proj_len * edge_unit
+                                    dist = np.linalg.norm(current_pos - closest_point)
+                                else:
+                                    dist = np.linalg.norm(current_pos - p1)
+                                min_dist = min(min_dist, dist)
+                            current_dev = min_dist
+                        else:
+                            # Unknown trajectory type, fallback
+                            current_dev = np.linalg.norm(current_pos - p_ref[0:3])
+                        # Record CLF deviation (when CBF is not triggered)
+                        clf_deviation.append(current_dev)
+                    else:
+                        # Fallback to original calculation
+                        current_dev = (np.linalg.norm(current_pos - p_ref[0:3]) +
+                                       self.clf.yaw_difference(env._get_robot_state(0)[5], p_ref[3]))
+                        # Record CLF deviation (when CBF is not triggered)
+                        clf_deviation.append(current_dev)
+                    
                     deviation.append(current_dev)
 
             # update stored observation
             self._obs = obs
             self._episode_step += 1
-
         print(f'mean deviation:', np.array(deviation).mean() if len(deviation) > 0 else 0.0)
+        print(f'CLF mean deviation (trajectory tracking): {np.array(clf_deviation).mean():.4f}' if len(clf_deviation) > 0 else 'CLF mean deviation: N/A')
+        print(f'CBF triggered steps: {cbf_triggered_steps} / {self._episode_step}')
+        print(f'CBF mean deviation (distance to sphere surface): {np.array(cbf_deviation).mean():.4f}' if len(cbf_deviation) > 0 else 'CBF mean deviation: N/A')
+        if hasattr(self, 'clf') and self.clf is not None and env.__class__.__name__ in self.clf._traj_states:
+            traj = self.clf._traj_states[env.__class__.__name__]['traj']
+            # Calculate total trajectory distance (sum of distances between consecutive points)
+            traj_distance = 0.0
+            for i in range(1, len(traj)):
+                traj_distance += np.linalg.norm(traj[i][:3] - traj[i-1][:3])
+            print(f"trajectory distance: {traj_distance:.4f}")
 
         if not is_train and episode[-1]['success'] == 1.0:
             # Just a file to indicate which episode is success.
