@@ -82,7 +82,6 @@ class Sampler:
             # position and orientation and obj position
             self.pos_ori_node = NeuralODE([6, 64, 30]).to(self.device)
 
-<<<<<<< HEAD
         # Initialize CLF
         # self.clf = PositionCLF(self.node.net, self.device)
         # self.clf = CLF(self.orn_node.net, self.device)
@@ -95,13 +94,6 @@ class Sampler:
         if isinstance(self._env.env, NeedlePickTrajectoryCBF):
             self._env.env.TRAJ_TYPE = traj_type
             print(f'Environment TRAJ_TYPE set to: {traj_type}')
-=======
-            # Initialize CLF
-            # self.clf = PositionCLF(self.node.net, self.device)
-            # self.clf = CLF(self.orn_node.net, self.device)
-            self.pos_ori_node.load_latest_weight(self.cfg.task, type='')
-            self.clf = CLF(self.pos_ori_node.net, self.device)
->>>>>>> eval/sphere
 
 
     def init(self):
@@ -170,27 +162,6 @@ class Sampler:
                 if violate_constraint:
                     num_violations += 1
                     print(f'Episode {ep:02}: warning: violate the constraint at episode step {self._episode_step}')
-<<<<<<< HEAD
-=======
-
-            # ===============================================================
-            #                  Control Barrier Function
-            # ===============================================================
-            # NOTE: Only use CBF during inference
-            if not is_train and self.cfg.use_dcbf and isinstance(self._env.env, self.supported_envs):
-                with torch.no_grad():
-                    u = 0.01 * self._env.env.SCALING * action[0:3]
-                    u = torch.tensor(u).unsqueeze(0).float().to(self.device)
-
-                    if isinstance(self._env.env, NeedlePickSphere) or isinstance(self._env.env, NeedleReachSphere) or isinstance(self._env.env, GauzeRetrieveSphere):
-                        env = self._env.env
-                        modified_action = self.cbf.sphere(u, env)
-                    elif isinstance(self._env.env, NeedlePickCylinder) or isinstance(self._env.env, GauzeRetrieveCylinder) or isinstance(self._env.env, NeedleReachPlate):
-                        env = self._env.env
-                        modified_action = self.cbf.cylinder(u, env)
-                    else:
-                        raise ValueError("Unsupported environment for CBF, such as no constraints defined for this env.")
->>>>>>> eval/sphere
                     
             # ===============================================================
             #                  Control Lyapunov Function
