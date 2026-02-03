@@ -27,3 +27,5 @@ train: False
 
 use_dcbf: False
 use_dclf: False
+use_new_deviation: False
+traj_type: line  # Options: 'line', 'circle', 'triangle'

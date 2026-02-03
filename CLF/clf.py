@@ -187,21 +187,208 @@ class PositionCLF():
 
 class CLF():
     # we learn the dynamics of the position and orientation of the end-effector, and use CLF to track a trajectory.
-    def __init__(self, net: torch.nn.Module, device: torch.device):
+    def __init__(self, net: torch.nn.Module, device: torch.device, traj_type: str = 'line'):
         self.net = net
         self.device = device
         self.x_dim = 6
         self.u_dim = 4
+        self.traj_type = traj_type  # 'line', 'circle', or 'triangle'
 
         self._traj_states = {}
+
+    def _init_trajectory_state(self, env, traj_type='line'):
+        """
+        Initialize trajectory state with selectable trajectory types.
+        
+        Args:
+            env: The environment
+            traj_type: 'line' (直线), 'circle' (转圈), or 'triangle' (三角形)
+        """
+        _horizon = 50  # Number of waypoints
+        
+        start = np.asarray(env._get_robot_state(0)[:3], dtype=np.float32)
+        goal = np.asarray(env.goal, dtype=np.float32)
+        yaw_start = np.asarray(env._get_robot_state(0)[5], dtype=np.float32)
+        
+        traj = []
+        
+        if traj_type == 'line':
+            # 直线轨迹: Linear interpolation from start to goal
+            positions = np.linspace(start, goal, _horizon)
+            yaws = np.linspace(yaw_start, yaw_start, _horizon)  # Keep yaw constant
+            
+            for k in range(_horizon):
+                traj.append([positions[k][0], positions[k][1], positions[k][2], 
+                            np.remainder(yaws[k] + np.pi, 2 * np.pi) - np.pi])
+                            
+        elif traj_type == 'circle':
+            # 转圈轨迹: Circular closed path returning to start
+            # goal is the same as start for circle trajectory
+            
+            # Circle center offset from start, with start at pi/4 position
+            circle_radius = 0.12  # Radius of the circle
+            theta_start = np.pi / 2  # 起点位置在 pi/4 (45度)
+            center_xy = start[:2] - circle_radius * np.array([np.cos(theta_start), np.sin(theta_start)], dtype=np.float32)
+            z_center = start[2]  # Keep z constant at start height
+    
+            theta_end = theta_start - 2 * np.pi  # Full circle back to start
+            goal = np.array([center_xy[0] + circle_radius * np.cos(theta_end), center_xy[1] + circle_radius * np.sin(theta_end), start[2]])
+            thetas = np.linspace(theta_start, theta_end, _horizon)
+            yaws = np.linspace(yaw_start, yaw_start, _horizon)
+            
+            for k in range(_horizon):
+                x_ref = center_xy[0] + circle_radius * np.cos(thetas[k])
+                y_ref = center_xy[1] + circle_radius * np.sin(thetas[k])
+                traj.append([x_ref, y_ref, start[2], 
+                            np.remainder(yaws[k] + np.pi, 2 * np.pi) - np.pi])
+            
+            # Store circle parameters for deviation calculation
+            circle_params = {
+                'center_xy': center_xy,
+                'radius': circle_radius,
+                'z_center': z_center,
+            }
+                            
+        elif traj_type == 'triangle':
+            # 三角形轨迹: Equilateral triangular closed path returning to start
+            # goal is the same as start for triangle trajectory
+            goal = start.copy()
+            
+            # Create an equilateral triangle with start as one vertex
+            triangle_size = 0.1  # Side length of the equilateral triangle
+            
+            # Three vertices of the equilateral triangle (start is vertex 0)
+            # For equilateral triangle: height = side * sqrt(3) / 2
+            triangle_height = triangle_size * np.sqrt(3) / 2
+            vertex1 = start + np.array([triangle_size, 0, 0], dtype=np.float32)
+            vertex2 = start + np.array([triangle_size / 2, -triangle_height, 0], dtype=np.float32)
+            
+            # Store triangle vertices for deviation calculation (closed triangle: start->v1->v2->start)
+            triangle_vertices = [start.copy(), vertex1.copy(), vertex2.copy(), start.copy()]
+            
+            # Segments (three edges of the triangle)
+            seg1_horizon = _horizon // 3
+            seg2_horizon = _horizon // 3
+            seg3_horizon = _horizon - seg1_horizon - seg2_horizon
+            
+            # Segment 1: start -> vertex1
+            pos1 = np.linspace(start, vertex1, seg1_horizon)
+            yaw1 = np.linspace(yaw_start, yaw_start, seg1_horizon)
+            for k in range(seg1_horizon):
+                traj.append([pos1[k][0], pos1[k][1], pos1[k][2],
+                            np.remainder(yaw1[k] + np.pi, 2 * np.pi) - np.pi])
+            
+            # Segment 2: vertex1 -> vertex2
+            pos2 = np.linspace(vertex1, vertex2, seg2_horizon)
+            yaw2 = np.linspace(yaw_start, yaw_start, seg2_horizon)
+            for k in range(seg2_horizon):
+                traj.append([pos2[k][0], pos2[k][1], pos2[k][2],
+                            np.remainder(yaw2[k] + np.pi, 2 * np.pi) - np.pi])
+            
+            # Segment 3: vertex2 -> start (return to starting point)
+            pos3 = np.linspace(vertex2, start, seg3_horizon)
+            yaw3 = np.linspace(yaw_start, yaw_start, seg3_horizon)
+            for k in range(seg3_horizon):
+                traj.append([pos3[k][0], pos3[k][1], pos3[k][2],
+                            np.remainder(yaw3[k] + np.pi, 2 * np.pi) - np.pi])
+        else:
+            raise ValueError(f"Unsupported trajectory type: {traj_type}. Use 'line', 'circle', or 'triangle'.")
+        
+        # Ensure the final point reaches the goal
+        traj.append([goal[0], goal[1], goal[2], np.remainder(yaw_start + np.pi, 2 * np.pi) - np.pi])
+        traj = np.asarray(traj, dtype=np.float32)
+        
+        # Build the state dictionary
+        state_dict = {
+            'goal': goal,
+            'start': start,
+            'traj': traj,
+            'traj_type': traj_type,
+        }
+        
+        # Add trajectory-specific parameters for deviation calculation
+        if traj_type == 'circle':
+            state_dict['circle_params'] = circle_params
+        elif traj_type == 'triangle':
+            state_dict['triangle_vertices'] = triangle_vertices
+        
+        self._traj_states[env.__class__.__name__] = state_dict
+
+    def _init_linear_state(self, env):
+        """Initialize a simple linear trajectory from start to goal."""
+        _line_horizon = 50  # Number of waypoints for linear trajectory
+
+        start = np.asarray(env._get_robot_state(0)[:3], dtype=np.float32)
+        goal = np.asarray(env.goal, dtype=np.float32) + np.array([0.0, 0.0, -0.06], dtype=np.float32)
+        goal_2 = start + np.array([0.06, 0.0, -0.06], dtype=np.float32)
+
+        # Linear interpolation from start to goal
+        pos = np.linspace(start, goal, _line_horizon)
+        pos2 = np.linspace(goal, goal_2, _line_horizon)
+
+        # Keep yaw constant (or interpolate if needed)
+        yaw_start = np.asarray(env._get_robot_state(0)[5], dtype=np.float32)
+        yaw_goal = yaw_start  # Keep same yaw, or set to desired value
+        yaws = np.linspace(yaw_start, yaw_goal, _line_horizon)
+
+        traj = []
+        #stage 1 : move above the goal
+        for k in range(_line_horizon):
+            traj.append([pos[k][0], pos[k][1], pos[k][2], np.remainder(yaws[k]+np.pi, 2 * np.pi)-np.pi])
+        
+        #stage 2 : move back
+        for k in range(_line_horizon):
+            traj.append([pos2[k][0], pos2[k][1], pos2[k][2], np.remainder(yaws[k]+np.pi, 2 * np.pi)-np.pi])
+        traj = np.asarray(traj, dtype=np.float32)
+
+
+        self._traj_states[env.__class__.__name__] = {
+            'goal': goal,
+            'start': start,
+            'traj': traj,
+        }
+
+    def _init_linear_state_cbf(self, env):
+        """Initialize a simple linear trajectory from start to goal."""
+        _line_horizon = 50  # Number of waypoints for linear trajectory
+
+        start = np.asarray(env._get_robot_state(0)[:3], dtype=np.float32)
+        # goal = np.asarray(env.goal, dtype=np.float32) + np.array([0.0, 0.0, -0.06], dtype=np.float32)
+        goal = start + np.array([0.0, -0.3, 0.00], dtype=np.float32)
+        goal_2 = start + np.array([0.06, 0.0, -0.06], dtype=np.float32)
+
+        # Linear interpolation from start to goal
+        pos = np.linspace(start, goal, _line_horizon)
+        pos2 = np.linspace(goal, goal_2, _line_horizon)
+
+        # Keep yaw constant (or interpolate if needed)
+        yaw_start = np.asarray(env._get_robot_state(0)[5], dtype=np.float32)
+        yaw_goal = yaw_start  # Keep same yaw, or set to desired value
+        yaws = np.linspace(yaw_start, yaw_goal, _line_horizon)
+
+        traj = []
+        #stage 1 : move above the goal
+        for k in range(_line_horizon):
+            traj.append([pos[k][0], pos[k][1], pos[k][2], np.remainder(yaws[k]+np.pi, 2 * np.pi)-np.pi])
+        
+        # #stage 2 : move back
+        # for k in range(_line_horizon):
+        #     traj.append([pos2[k][0], pos2[k][1], pos2[k][2], np.remainder(yaws[k]+np.pi, 2 * np.pi)-np.pi])
+        traj = np.asarray(traj, dtype=np.float32)
+
+
+        self._traj_states[env.__class__.__name__] = {
+            'goal': goal,
+            'start': start,
+            'traj': traj,
+        }
 
     def _init_spiral_state(self, env):
         _line_horizon = 10
         # initial and middle z bias
         z_bias_1 = 0.075
         z_bias_2 = 0.045
-        # TODO: find the needle radius from the env
-        _needle_radius = 0.1
+        _needle_radius = 0.07
         _spiral_horizon = 40
         _spiral_turns = 0.75
 
@@ -210,7 +397,8 @@ class CLF():
 
         # first stage: move the needle close to the target
         pos_start = start
-        theta_end = 0.25 * np.pi
+        # theta_end = 0.25 * np.pi
+        theta_end = np.pi / 2
         center = goal + np.array([_needle_radius, 0.0, z_bias_1])
         pos_end = np.array([center[0] + _needle_radius * np.cos(theta_end),
                             center[1] + _needle_radius * np.sin(theta_end),
@@ -219,7 +407,8 @@ class CLF():
         pos = np.linspace(pos_start, pos_end, _line_horizon)
 
         yaw_start = np.asarray(env._get_robot_state(0)[5], dtype=np.float32)
-        yaw_end = 0.25 * np.pi
+        # yaw_end = 0.25 * np.pi
+        yaw_end = theta_end
 
         yaws = np.linspace(yaw_start, yaw_end, _line_horizon)
 
@@ -265,6 +454,12 @@ class CLF():
         if key not in self._traj_states:
             if key == 'NeedlePickWoundCLF':
                 self._init_spiral_state(env)
+            elif key == 'NeedlePickLungCLF':
+                self._init_linear_state(env)
+            elif key == 'NeedlePickTrajectoryCLF':
+                self._init_trajectory_state(env, traj_type=self.traj_type)
+            elif key == 'NeedlePickTrajectoryCBF':
+                self._init_trajectory_state(env, traj_type=self.traj_type)
             else:
                 raise ValueError("Unsupported environment for CLF, such as no trajectory defined for this env.")
             self.traj_idx = 0
@@ -276,7 +471,13 @@ class CLF():
         pos_threshold = getattr(env, 'DISTANCE_THRESHOLD', 0.005) * getattr(env, 'SCALING', 1.0)
         ori_threshold = 0.05
 
-        if (np.linalg.norm(psm_pos - state['traj'][-1][0:3]) < pos_threshold
+        # Only allow jumping to final point after completing most of the trajectory (80%)
+        # This prevents jumping to end at start for closed trajectories (circle, triangle)
+        traj_progress_threshold = 0.8
+        has_sufficient_progress = self.traj_idx >= len(state['traj']) * traj_progress_threshold
+
+        if (has_sufficient_progress
+                and np.linalg.norm(psm_pos - state['traj'][-1][0:3]) < pos_threshold
                 and self.yaw_difference(robot_state[5], state['traj'][-1][3]) < ori_threshold):
             p_ref = state['traj'][-1]
         # Step forward if close to the current reference point.
@@ -294,6 +495,44 @@ class CLF():
 
         return p_ref
 
+
+    @torch.no_grad()
+    def traj_tracking_linear(self, u, env):
+        """Linear trajectory tracking without needle grasping check."""
+        p_ref = self._get_reference(env)
+        psm_pos_ori = env._get_robot_state(0)[:6]
+
+        p_ref_t = torch.from_numpy(p_ref).float().unsqueeze(0).to(self.device)
+        psm_pos_ori_t = torch.from_numpy(psm_pos_ori).float().unsqueeze(0).to(self.device)
+
+        with torch.enable_grad():
+            psm_pos_ori_t.requires_grad_(True)
+            V = 0.5 * torch.sum((torch.concat((psm_pos_ori_t[:, :3], psm_pos_ori_t[:, [5]]), dim=1) - p_ref_t) ** 2)
+            V.backward()
+            grad_V = psm_pos_ori_t.grad.detach()
+
+        psm_pos_ori_t.requires_grad_(False)
+
+        net_out = self.net(psm_pos_ori_t)
+        fx = net_out[:, :self.x_dim]
+        gx = net_out[:, self.x_dim:]
+        gx = torch.reshape(gx, (self.u_dim, self.x_dim))
+
+        LfV = grad_V @ fx.T
+        LgV = grad_V @ gx.T
+        epsilon = 20.0
+        G = LgV.to(self.device)
+        h = (-epsilon * V - LfV).to(self.device)
+        P = torch.eye(self.u_dim).to(self.device)
+        q = torch.zeros(self.u_dim)
+
+        try:
+            modified_u = cvx_solver(P.double(), q.double(), G.double(), h.double())
+            modified_u = torch.from_numpy(modified_u).float().to(self.device).reshape(1, -1)
+        except Exception:
+            modified_u = u
+
+        return modified_u, p_ref
 
     @torch.no_grad()
     def traj_tracking(self, u, env):

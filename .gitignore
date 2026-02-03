@@ -29,6 +29,7 @@ MANIFEST
 
 # Exp
 /exp_local
+/exp_local_old
 
 # Vim
 .*.s[a-w][a-z]
@@ -85,5 +86,6 @@ video/
 
 ## NeuralODE's weight
 NeuralODE/weights
+NeuralODE/weights_old
 NeuralODE/data
 NeuralODE/OAR.*
