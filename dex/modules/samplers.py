@@ -67,8 +67,7 @@ class Sampler:
         # Initialize Neural ODE
         # the neural ode has dims [x_dim, 64, x_dim + x_dim * u_dim]
         # position only: x_dim=3, u_dim=3, output=3+3*3=12
-        # self.node = NeuralODE([3, 64, 12]).to(self.device)
-        self.node = NeuralODE([3, 64, 64, 12]).to(self.device)
+        self.node = NeuralODE([3, 64, 12]).to(self.device)
 
         if self.cfg.use_dcbf:
 
