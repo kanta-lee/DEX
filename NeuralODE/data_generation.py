@@ -27,10 +27,7 @@ from tqdm import tqdm
 
 TASKS = [
     'NeedlePick-v0',
-    'NeedlePick-v1', 
-    'NeedlePick-v2', 
-    'GauzeRetrieve-v1', 
-    'GauzeRetrieve-v2',
+    'GauzeRetrieve-v0',
     'NeedleReach-v0',
     'PegTransfer-v0'
 ]
@@ -128,7 +125,10 @@ np.save(f'data/{args.task}/obs_pos.npy', obs_pos)
 np.save(f'data/{args.task}/acs_pos.npy', acs_pos)
 np.save(f'data/{args.task}/obs_orn.npy', obs_orn)
 np.save(f'data/{args.task}/acs_orn.npy', acs_orn)
-np.save(f'data/{args.task}/obj_pos.npy', obj_pos)
-np.save(f'data/{args.task}/obj_orn.npy', obj_orn)
+if args.task in ['NeedlePick-v0', 'NeedlePick-v1', 'NeedlePick-v2']:
+    np.save(f'data/{args.task}/obj_pos.npy', obj_pos)
+    np.save(f'data/{args.task}/obj_orn.npy', obj_orn)
+else:
+    print("If you want the object data to save for this task, update _process_demo().")
 
 print(f"Data processing completed for {args.task}")

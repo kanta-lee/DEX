@@ -13,10 +13,8 @@ from node import NeuralODE
 torch.autograd.set_detect_anomaly(True)
 
 TASKS = [
-    'NeedlePick-v1',
-    'NeedlePick-v2',
-    'GauzeRetrieve-v1',
-    'GauzeRetrieve-v2'
+    'NeedlePick-v0',
+    'PegTransfer-v0'
 ]
 
 def setup_argparser() -> argparse.ArgumentParser:
@@ -52,7 +50,7 @@ def load_data(task_name: str, device: torch.device) -> Tuple:
     SCALING = 5.0 # See SurRoL code
     acs_pos = acs_pos * 0.01 * SCALING
 
-    if task_name == 'NeedlePick-v1' or task_name == 'NeedlePick-v2':
+    if task_name.startswith('NeedlePick') or task_name.startswith('PegTransfer'):
         # obs_orn: [num_demo, num_timestep, 4] - [roll, pitch, yaw, jaw_angle]
         # Excluding jaw_angle as it's not part of the control space
         obs_orn = obs_orn[:, :, 0:3]
@@ -65,9 +63,7 @@ def load_data(task_name: str, device: torch.device) -> Tuple:
         obs = np.concatenate([obs_pos, obs_orn], axis=2)
         acs = np.concatenate([acs_pos, acs_orn], axis=2)
     else:
-        # GauzeRetrieve-v1 and GauzeRetrieve-v2 have no yaw control.
-        obs = obs_pos
-        acs = acs_pos
+        raise ValueError("Unsupported task for orientation data.")
 
     # Convert to torch tensor
     obs = torch.from_numpy(obs).float().to(device)

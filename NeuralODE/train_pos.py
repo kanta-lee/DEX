@@ -13,13 +13,10 @@ from node import NeuralODE
 torch.autograd.set_detect_anomaly(True)
 
 TASKS = [
-    'NeedlePick-v1',
-    'NeedlePick-v2',
-    'GauzeRetrieve-v1',
-    'GauzeRetrieve-v2',
+    'NeedlePick-v0',
+    'GauzeRetrieve-v0',
     'NeedleReach-v0',
     'PegTransfer-v0',
-    'NeedlePick-v7'
 ]
 
 def setup_argparser() -> argparse.ArgumentParser:
