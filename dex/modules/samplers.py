@@ -18,14 +18,14 @@ from surrol.tasks.needle_pick_trajectory_cbf import NeedlePickTrajectoryCBF
 from surrol.tasks.gauze_retrieve import GauzeRetrieve
 from surrol.tasks.gauze_retrieve_sphere import GauzeRetrieveSphere
 from surrol.tasks.gauze_retrieve_cylinder import GauzeRetrieveCylinder
-from surrol.tasks.needle_reach_sphere import NeedleReach as NeedleReachSphere
-from surrol.tasks.needle_reach_plate_obstacle import NeedleReach as NeedleReachPlate
-from surrol.tasks.peg_transfer_sphere_obstacle import PegTransfer as PegTransferSphere
-from surrol.tasks.peg_transfer_plate_obstacle import PegTransfer as PegTransferPlate
+from surrol.tasks.needle_reach_sphere import NeedleReachSphere
+from surrol.tasks.needle_reach_plate_obstacle import NeedleReachPlate
+from surrol.tasks.peg_transfer_sphere_obstacle import PegTransferSphere
+from surrol.tasks.peg_transfer_plate_obstacle import PegTransferPlate
 
 from NeuralODE.node import NeuralODE
 from CBF.cbf import CBF
-from CLF.clf import CLF
+from CLF.clf import CLF, PositionCLF
 
 
 class Sampler:
@@ -63,11 +63,19 @@ class Sampler:
             PegTransferSphere,
             PegTransferPlate
         )
-
+        self.pos_envs = (
+            GauzeRetrieve,
+            GauzeRetrieveCylinder, 
+            GauzeRetrieveSphere, 
+            NeedleReachSphere,
+            NeedleReachPlate,
+            NeedleReachSphere,
+        )
         # Initialize Neural ODE
         # the neural ode has dims [x_dim, 64, x_dim + x_dim * u_dim]
         # position only: x_dim=3, u_dim=3, output=3+3*3=12
-        self.node = NeuralODE([3, 64, 12]).to(self.device)
+        # self.node = NeuralODE([3, 64, 12]).to(self.device)
+        # self.node = NeuralODE([3, 64, 64, 12]).to(self.device)
 
         if self.cfg.use_dcbf:
 
@@ -83,15 +91,24 @@ class Sampler:
             self.cbf = CBF(self.node.net, self.device)
         if  self.cfg.use_dclf:
             # position and orientation and obj position
-            self.pos_ori_node = NeuralODE([6, 64, 30]).to(self.device)
+            if isinstance(self._env.env, self.pos_envs):
+                self.pos_ori_node = NeuralODE([3, 64, 12]).to(self.device)
+                self.pos_ori_node.load_latest_weight(self.cfg.task, type='pos_')
+                self.clf = PositionCLF(self.pos_ori_node.net, self.device)
+            else:
+                self.pos_ori_node = NeuralODE([6, 64, 30]).to(self.device)
+                self.pos_ori_node.load_latest_weight(self.cfg.task, type='')
+                traj_type = getattr(self.cfg, 'traj_type', 'line')  # Default to 'line' if not specified
+                self.clf = CLF(self.pos_ori_node.net, self.device, traj_type=traj_type)
+                print(f'CLF initialized with traj_type: {traj_type}')
 
-        # Initialize CLF
-        # self.clf = PositionCLF(self.node.net, self.device)
-        # self.clf = CLF(self.orn_node.net, self.device)
-        self.pos_ori_node.load_latest_weight(self.cfg.task, type='')
-        traj_type = getattr(self.cfg, 'traj_type', 'line')  # Default to 'line' if not specified
-        self.clf = CLF(self.pos_ori_node.net, self.device, traj_type=traj_type)
-        print(f'CLF initialized with traj_type: {traj_type}')
+            # # Initialize CLF
+            # # self.clf = PositionCLF(self.node.net, self.device)
+            # # self.clf = CLF(self.orn_node.net, self.device)
+            # self.pos_ori_node.load_latest_weight(self.cfg.task, type='')
+            # traj_type = getattr(self.cfg, 'traj_type', 'line')  # Default to 'line' if not specified
+            # self.clf = CLF(self.pos_ori_node.net, self.device, traj_type=traj_type)
+            # print(f'CLF initialized with traj_type: {traj_type}')
         
         # Sync traj_type to environment for obstacle placement
         if isinstance(self._env.env, NeedlePickTrajectoryCBF):
@@ -102,6 +119,11 @@ class Sampler:
     def init(self):
         """Starts a new rollout. Render indicates whether output should contain image."""
         self._episode_reset()
+        # Reset CLF trajectory for environments where waypoints depend on object positions
+        if self.cfg.use_dclf and hasattr(self, 'clf'):
+            # Use actual environment class name as key
+            env_name = self._env.env.__class__.__name__
+            self.clf.reset_trajectory(env_name)
 
     def sample_action(self, obs, is_train):
         return self._agent.get_action(obs, noise=is_train)
@@ -119,7 +141,15 @@ class Sampler:
         clf_deviation = []
         
         # Determine path type
-        path_type = "CLF" if self.cfg.use_dclf else "CBF" if self.cfg.use_dcbf else "NONE"
+        # path_type = "CLF" if self.cfg.use_dclf else "CBF" if self.cfg.use_dcbf else "NONE"
+        if self.cfg.use_dclf and self.cfg.use_dcbf:
+            path_type = "CLF_CBF"
+        elif self.cfg.use_dclf:
+            path_type = "CLF"
+        elif self.cfg.use_dcbf:
+            path_type = "CBF"
+        else:
+            path_type = "NONE"
 
         # Create full path with seed
         base_path = f"saved_eval_pic/{path_type}/{self.cfg.task}/s{self.cfg.seed}/{ep:02}"
@@ -164,7 +194,8 @@ class Sampler:
                 
                 if violate_constraint:
                     num_violations += 1
-                    print(f'Episode {ep:02}: warning: violate the constraint at episode step {self._episode_step}')                    
+                    print(f'Episode {ep:02}: warning: violate the constraint at episode step {self._episode_step}')
+                    
             # ===============================================================
             #                  Control Lyapunov Function
             # ===============================================================
@@ -188,9 +219,18 @@ class Sampler:
                     elif isinstance(self._env.env, NeedlePickTrajectoryCBF):
                         env = self._env.env
                         modified_action, p_ref = self.clf.traj_tracking_linear(u, env)
-                    elif isinstance(self._env.env, GauzeRetrieve):
+                    elif isinstance(self._env.env, (NeedlePick, NeedlePickSphere, NeedlePickCylinder, 
+                                    PegTransferPlate, PegTransferSphere)):
                         env = self._env.env
-                        modified_action, p_ref = self.clf.traj_tracking(u, env)
+                        modified_action, p_ref, gripper_state = self.clf.traj_tracking_waypoints(u, env)
+                        # Set gripper state from trajectory (automatically close gripper at grasp point)
+                        if gripper_state is not None:
+                            action[4] = gripper_state
+                    elif isinstance(self._env.env, self.pos_envs):
+                        env = self._env.env
+                        modified_action, p_ref, gripper_state = self.clf.traj_tracking_waypoints(u, env)
+                        if gripper_state is not None:
+                            action[4] = gripper_state
                     else:
                         raise ValueError("Unsupported environment for CLF, such as no CLF defined for this env.")
                     # Scale back the action before input into gym environment
@@ -207,12 +247,16 @@ class Sampler:
                     u_original = u.copy()
                     u = torch.tensor(u).unsqueeze(0).float().to(self.device)
 
-                    if isinstance(self._env.env, NeedlePickSphere) or isinstance(self._env.env, NeedleReachSphere) or isinstance(self._env.env, GauzeRetrieveSphere) or isinstance(self._env.env, PegTransferSphere) \
-                        or isinstance(self._env.env, NeedlePickLungCLF) or isinstance(self._env.env, NeedlePickTrajectoryCLF) or isinstance(self._env.env, NeedlePickTrajectoryCBF):
-                        env = self._env.env
+                    # Environments with sphere obstacles
+                    sphere_envs = (NeedlePickSphere, NeedleReachSphere, GauzeRetrieveSphere, PegTransferSphere,
+                                   NeedlePickLungCLF, NeedlePickTrajectoryCLF, NeedlePickTrajectoryCBF, NeedleReachSphere)
+                    # Environments with cylinder/plate obstacles
+                    cylinder_envs = (NeedlePickCylinder, GauzeRetrieveCylinder, NeedleReachPlate, PegTransferPlate)
+                    
+                    env = self._env.env
+                    if isinstance(env, sphere_envs):
                         modified_action = self.cbf.sphere(u, env)
-                    elif isinstance(self._env.env, NeedlePickCylinder) or isinstance(self._env.env, GauzeRetrieveCylinder) or isinstance(self._env.env, NeedleReachPlate) or isinstance(self._env.env, PegTransferPlate):
-                        env = self._env.env
+                    elif isinstance(env, cylinder_envs):
                         modified_action = self.cbf.cylinder(u, env)
                     else:
                         raise ValueError("Unsupported environment for CBF, such as no constraints defined for this env.")
@@ -324,8 +368,8 @@ class Sampler:
                         clf_deviation.append(current_dev)
                     else:
                         # Fallback to original calculation
-                        current_dev = (np.linalg.norm(current_pos - p_ref[0:3]) +
-                                       self.clf.yaw_difference(env._get_robot_state(0)[5], p_ref[3]))
+                        current_dev = (np.linalg.norm(current_pos - p_ref[0:3]))
+                                    #    self.clf.yaw_difference(env._get_robot_state(0)[5], p_ref[3]))
                         # Record CLF deviation (when CBF is not triggered)
                         clf_deviation.append(current_dev)
                     
@@ -338,6 +382,10 @@ class Sampler:
         print(f'CLF mean deviation (trajectory tracking): {np.array(clf_deviation).mean():.4f}' if len(clf_deviation) > 0 else 'CLF mean deviation: N/A')
         print(f'CBF triggered steps: {cbf_triggered_steps} / {self._episode_step}')
         print(f'CBF mean deviation (distance to sphere surface): {np.array(cbf_deviation).mean():.4f}' if len(cbf_deviation) > 0 else 'CBF mean deviation: N/A')
+        if isinstance(self._obs, dict):
+            last_dist = np.linalg.norm(self._obs['achieved_goal'] - self._obs['desired_goal'])
+            print(f'last-step goal distance: {last_dist:.6f}')
+        print(f'episode step: {self._episode_step},success: {episode[-1]["success"]}')
         if hasattr(self, 'clf') and self.clf is not None and env.__class__.__name__ in self.clf._traj_states:
             traj = self.clf._traj_states[env.__class__.__name__]['traj']
             # Calculate total trajectory distance (sum of distances between consecutive points)

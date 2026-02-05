@@ -32,6 +32,108 @@ class PositionCLF():
         self.u_dim = 3
 
         self._traj_states = {}
+        self.traj_idx = 0
+
+    def reset_trajectory(self, env_name=None):
+        """Reset trajectory state for a new episode."""
+        if env_name is not None:
+            if env_name in self._traj_states:
+                del self._traj_states[env_name]
+        else:
+            self._traj_states = {}
+        self.traj_idx = 0
+
+    def _init_reach_state(self, env):
+        """
+        Initialize trajectory from environment reach points with linear interpolation.
+        Position-only version (no yaw tracking).
+        """
+        _interp_points = 2  # Number of interpolation points between waypoints
+        start = np.asarray(env._get_robot_state(0)[:3], dtype=np.float32)
+        goal = np.asarray(env.goal, dtype=np.float32) + np.array([0.0, 0.0, 0.05])
+        
+        traj = []
+        positions = np.linspace(start, goal, _interp_points)
+        
+        for k in range(_interp_points):
+            traj.append([positions[k][0], positions[k][1], positions[k][2]])
+        
+        # Ensure the final point reaches the goal
+        traj = np.asarray(traj, dtype=np.float32)
+        
+        self._traj_states[env.__class__.__name__] = {
+            'goal': goal,
+            'start': start,
+            'traj': traj
+        }
+
+    def _init_waypoint_state(self, env):
+        """
+        Initialize trajectory from environment waypoints with linear interpolation.
+        Position-only version (no yaw tracking).
+        
+        Each waypoint has format: [x, y, z, yaw, gripper_state]
+        - gripper_state > 0: open
+        - gripper_state < 0: closed
+        """
+        _interp_points = 2  # Number of interpolation points between waypoints
+        
+        # Get waypoints from environment
+        waypoints = env._waypoints.copy()
+        if waypoints is None or len(waypoints) < 2:
+            raise ValueError("Environment must have at least 2 waypoints defined")
+        
+        # Filter out None waypoints
+        valid_waypoints = [wp for wp in waypoints if wp is not None]
+        if len(valid_waypoints) < 2:
+            raise ValueError("Environment must have at least 2 valid waypoints")
+        
+        start = np.asarray(env._get_robot_state(0)[:3], dtype=np.float32)
+        goal = np.asarray(valid_waypoints[-1][:3], dtype=np.float32)
+        
+        traj = []
+        gripper_states = []
+        
+        # First segment: from current position to first waypoint
+        wp0 = valid_waypoints[0]
+        pos_start = start
+        pos_end = np.asarray(wp0[:3], dtype=np.float32)
+        gripper = wp0[4]
+        
+        positions = np.linspace(pos_start, pos_end, _interp_points)
+        for k in range(_interp_points):
+            traj.append([positions[k][0], positions[k][1], positions[k][2]])
+            gripper_states.append(gripper)
+        
+        # Subsequent segments: between consecutive waypoints
+        for i in range(len(valid_waypoints) - 1):
+            wp_curr = valid_waypoints[i]
+            wp_next = valid_waypoints[i + 1]
+            
+            pos_start = np.asarray(wp_curr[:3], dtype=np.float32)
+            pos_end = np.asarray(wp_next[:3], dtype=np.float32)
+            gripper = wp_next[4]
+            
+            positions = np.linspace(pos_start, pos_end, _interp_points)
+            for k in range(_interp_points):
+                traj.append([positions[k][0], positions[k][1], positions[k][2]])
+                gripper_states.append(gripper)
+        
+        # Ensure the final point reaches the goal
+        final_wp = valid_waypoints[-1]
+        traj.append([final_wp[0], final_wp[1], final_wp[2]])
+        gripper_states.append(final_wp[4])
+        
+        traj = np.asarray(traj, dtype=np.float32)
+        gripper_states = np.asarray(gripper_states, dtype=np.float32)
+        
+        self._traj_states[env.__class__.__name__] = {
+            'goal': goal,
+            'start': start,
+            'traj': traj,
+            'gripper_states': gripper_states,
+            'traj_type': 'waypoints',
+        }
 
     def _init_spiral_state(self, env):
         _spiral_horizon = 30
@@ -116,11 +218,18 @@ class PositionCLF():
 
     def _get_reference(self, env):
         key = env.__class__.__name__
+        # Environments that use waypoint-based trajectories
+        waypoint_envs = ('NeedlePickSphere', 'NeedlePickCylinder', 'GauzeRetrieveCylinder', 'GauzeRetrieveSphere')
+        reach_envs = ('NeedleReachSphere', 'NeedleReachPlate')
         if key not in self._traj_states:
             if key == 'NeedlePick':
                 self._init_spiral_state(env)
             elif key == 'GauzeRetrieve':
                 self._init_wipe_state(env)
+            elif key in waypoint_envs:
+                self._init_waypoint_state(env)
+            elif key in reach_envs:
+                self._init_reach_state(env)
             else:
                 raise ValueError("Unsupported environment for CLF, such as no trajectory defined for this env.")
             self.traj_idx = 0
@@ -141,6 +250,64 @@ class PositionCLF():
 
         return p_ref
 
+    def get_current_gripper_state(self, env):
+        """Get the gripper state for the current trajectory index."""
+        key = env.__class__.__name__
+        if key not in self._traj_states:
+            return None
+        state = self._traj_states[key]
+        if 'gripper_states' not in state:
+            return None
+        
+        idx = min(self.traj_idx, len(state['gripper_states']) - 1)
+        return state['gripper_states'][idx]
+
+    @torch.no_grad()
+    def traj_tracking_waypoints(self, u, env):
+        """
+        Trajectory tracking for waypoint-based trajectories.
+        Returns modified action, reference point, and gripper state.
+        Position-only version (no yaw tracking).
+        """
+        p_ref = self._get_reference(env)
+        gripper_state = self.get_current_gripper_state(env)
+        psm_pos = env._get_robot_state(0)[:3]
+
+        p_ref_t = torch.from_numpy(p_ref).float().unsqueeze(0).to(self.device)
+        psm_pos_t = torch.from_numpy(psm_pos).float().unsqueeze(0).to(self.device)
+
+        with torch.enable_grad():
+            psm_pos_t.requires_grad_(True)
+            V = 0.5 * torch.sum((psm_pos_t - p_ref_t) ** 2)
+            V.backward()
+            grad_V = psm_pos_t.grad.detach()
+
+        psm_pos_t.requires_grad_(False)
+
+        net_out = self.net(psm_pos_t)
+        fx = net_out[:, :self.x_dim]
+        gx = net_out[:, self.x_dim:]
+        gx = torch.reshape(gx, (self.u_dim, self.x_dim))
+
+        LfV = grad_V @ fx.T
+        LgV = grad_V @ gx.T
+
+        epsilon = 15.0
+        G = LgV.to(self.device)
+        h = (-epsilon * V - LfV).to(self.device)
+        P = torch.eye(self.u_dim).to(self.device)
+        q = torch.zeros(self.u_dim)
+
+        try:
+            modified_u = cvx_solver(P.double(), q.double(), G.double(), h.double())
+            modified_u = torch.from_numpy(modified_u).float().to(self.device).reshape(1, -1)
+        except Exception:
+            modified_u = u
+        #add zero yaw angle to the modified_u to make it 4D Note: yaw angle will be set to 0 in the env.step
+        zero_tensor = torch.zeros(1, 1, device=modified_u.device)
+        zero_tensor = zero_tensor.expand(modified_u.shape[0], 1)
+        modified_u = torch.cat([modified_u, zero_tensor], dim=-1)
+        return modified_u, p_ref, gripper_state
 
     @torch.no_grad()
     def traj_tracking(self, u, env):
@@ -195,6 +362,23 @@ class CLF():
         self.traj_type = traj_type  # 'line', 'circle', or 'triangle'
 
         self._traj_states = {}
+
+    def reset_trajectory(self, env_name=None):
+        """
+        Reset trajectory state for a new episode.
+        Should be called at the start of each episode for environments
+        where waypoints depend on object positions (e.g., NeedlePick).
+        
+        Args:
+            env_name: If provided, only reset for this specific environment.
+                      If None, reset all trajectory states.
+        """
+        if env_name is not None:
+            if env_name in self._traj_states:
+                del self._traj_states[env_name]
+        else:
+            self._traj_states = {}
+        self.traj_idx = 0
 
     def _init_trajectory_state(self, env, traj_type='line'):
         """
@@ -441,6 +625,91 @@ class CLF():
             'traj': traj,
         }
 
+    def _init_waypoint_state(self, env):
+        """
+        Initialize trajectory from environment waypoints with linear interpolation.
+        Used for NeedlePick task to follow waypoints for grasping and lifting.
+        
+        Each waypoint has format: [x, y, z, yaw, gripper_state]
+        - gripper_state > 0: open
+        - gripper_state < 0: closed
+        """
+        _interp_points = 2  # Number of interpolation points between waypoints
+        
+        # Get waypoints from environment
+        waypoints = env._waypoints.copy()
+        if waypoints is None or len(waypoints) < 2:
+            raise ValueError("Environment must have at least 2 waypoints defined")
+        
+        # Filter out None waypoints
+        valid_waypoints = [wp for wp in waypoints if wp is not None]
+        if len(valid_waypoints) < 2:
+            raise ValueError("Environment must have at least 2 valid waypoints")
+        
+        start = np.asarray(env._get_robot_state(0)[:3], dtype=np.float32)
+        yaw_start = np.asarray(env._get_robot_state(0)[5], dtype=np.float32)
+        goal = np.asarray(valid_waypoints[-1][:3], dtype=np.float32)
+        
+        traj = []
+        gripper_states = []  # Track gripper state for each trajectory point
+        waypoint_indices = [0]  # Track which trajectory index corresponds to each waypoint
+        
+        # First segment: from current position to first waypoint
+        wp0 = valid_waypoints[0]
+        pos_start = start
+        pos_end = np.asarray(wp0[:3], dtype=np.float32)
+        yaw_end = wp0[3]
+        gripper = wp0[4]
+        
+        positions = np.linspace(pos_start, pos_end, _interp_points)
+        yaws = np.linspace(yaw_start, yaw_end, _interp_points)
+        
+        for k in range(_interp_points):
+            traj.append([positions[k][0], positions[k][1], positions[k][2],
+                        np.remainder(yaws[k] + np.pi, 2 * np.pi) - np.pi])
+            gripper_states.append(gripper)
+        
+        waypoint_indices.append(len(traj))
+        
+        # Subsequent segments: between consecutive waypoints
+        for i in range(len(valid_waypoints) - 1):
+            wp_curr = valid_waypoints[i]
+            wp_next = valid_waypoints[i + 1]
+            
+            pos_start = np.asarray(wp_curr[:3], dtype=np.float32)
+            pos_end = np.asarray(wp_next[:3], dtype=np.float32)
+            yaw_start_seg = wp_curr[3]
+            yaw_end_seg = wp_next[3]
+            gripper = wp_next[4]  # Use the gripper state of the target waypoint
+            
+            positions = np.linspace(pos_start, pos_end, _interp_points)
+            yaws = np.linspace(yaw_start_seg, yaw_end_seg, _interp_points)
+            
+            for k in range(_interp_points):
+                traj.append([positions[k][0], positions[k][1], positions[k][2],
+                            np.remainder(yaws[k] + np.pi, 2 * np.pi) - np.pi])
+                gripper_states.append(gripper)
+            
+            waypoint_indices.append(len(traj))
+        
+        # Ensure the final point reaches the goal
+        final_wp = valid_waypoints[-1]
+        traj.append([final_wp[0], final_wp[1], final_wp[2],
+                    np.remainder(final_wp[3] + np.pi, 2 * np.pi) - np.pi])
+        gripper_states.append(final_wp[4])
+        
+        traj = np.asarray(traj, dtype=np.float32)
+        gripper_states = np.asarray(gripper_states, dtype=np.float32)
+        
+        self._traj_states[env.__class__.__name__] = {
+            'goal': goal,
+            'start': start,
+            'traj': traj,
+            'gripper_states': gripper_states,
+            'waypoint_indices': waypoint_indices,
+            'traj_type': 'waypoints',
+        }
+
     def yaw_difference(self, yaw1, yaw2):
         diff = yaw1 - yaw2
         while diff > np.pi:
@@ -460,6 +729,10 @@ class CLF():
                 self._init_trajectory_state(env, traj_type=self.traj_type)
             elif key == 'NeedlePickTrajectoryCBF':
                 self._init_trajectory_state(env, traj_type=self.traj_type)
+            elif key == 'NeedlePick' or key == 'NeedlePickSphere' or key == 'NeedlePickCylinder':
+                self._init_waypoint_state(env)
+            elif key == 'PegTransferPlate' or key == 'PegTransferSphere':
+                self._init_waypoint_state(env)
             else:
                 raise ValueError("Unsupported environment for CLF, such as no trajectory defined for this env.")
             self.traj_idx = 0
@@ -495,6 +768,63 @@ class CLF():
 
         return p_ref
 
+    def get_current_gripper_state(self, env):
+        """
+        Get the gripper state for the current trajectory index.
+        Returns None if gripper_states is not available (non-waypoint trajectories).
+        """
+        key = env.__class__.__name__
+        if key not in self._traj_states:
+            return None
+        state = self._traj_states[key]
+        if 'gripper_states' not in state:
+            return None
+        
+        idx = min(self.traj_idx, len(state['gripper_states']) - 1)
+        return state['gripper_states'][idx]
+
+    @torch.no_grad()
+    def traj_tracking_waypoints(self, u, env):
+        """
+        Trajectory tracking for waypoint-based trajectories (e.g., NeedlePick).
+        Returns modified action, reference point, and gripper state.
+        Does not check for needle grasping activation.
+        """
+        p_ref = self._get_reference(env)
+        gripper_state = self.get_current_gripper_state(env)
+        psm_pos_ori = env._get_robot_state(0)[:6]
+
+        p_ref_t = torch.from_numpy(p_ref).float().unsqueeze(0).to(self.device)
+        psm_pos_ori_t = torch.from_numpy(psm_pos_ori).float().unsqueeze(0).to(self.device)
+
+        with torch.enable_grad():
+            psm_pos_ori_t.requires_grad_(True)
+            V = 0.5 * torch.sum((torch.concat((psm_pos_ori_t[:, :3], psm_pos_ori_t[:, [5]]), dim=1) - p_ref_t) ** 2)
+            V.backward()
+            grad_V = psm_pos_ori_t.grad.detach()
+
+        psm_pos_ori_t.requires_grad_(False)
+
+        net_out = self.net(psm_pos_ori_t)
+        fx = net_out[:, :self.x_dim]
+        gx = net_out[:, self.x_dim:]
+        gx = torch.reshape(gx, (self.u_dim, self.x_dim))
+
+        LfV = grad_V @ fx.T
+        LgV = grad_V @ gx.T
+        epsilon = 20.0
+        G = LgV.to(self.device)
+        h = (-epsilon * V - LfV).to(self.device)
+        P = torch.eye(self.u_dim).to(self.device)
+        q = torch.zeros(self.u_dim)
+
+        try:
+            modified_u = cvx_solver(P.double(), q.double(), G.double(), h.double())
+            modified_u = torch.from_numpy(modified_u).float().to(self.device).reshape(1, -1)
+        except Exception:
+            modified_u = u
+
+        return modified_u, p_ref, gripper_state
 
     @torch.no_grad()
     def traj_tracking_linear(self, u, env):

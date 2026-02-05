@@ -82,10 +82,11 @@ saved_eval_pic/
 Data/
 
 log/
+logs/
 video/
 
 ## NeuralODE's weight
-NeuralODE/weights
-NeuralODE/weights_old
+NeuralODE/weights*
+
 NeuralODE/data
 NeuralODE/OAR.*

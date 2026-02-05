@@ -55,7 +55,7 @@ class CBF():
         Lfb = grad_b @ fx.T  # [1, 1]
         Lgb = grad_b @ gx.T  # [1, 9]
         
-        gamma = 1
+        gamma = 10
         G = -Lgb.to(self.device)
         h = (Lfb + gamma * b).to(self.device)
         P = torch.eye(self.u_dim).to(self.device)
