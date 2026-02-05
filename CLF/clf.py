@@ -337,7 +337,7 @@ class PositionCLF():
         LfV = grad_V @ fx.T
         LgV = grad_V @ gx.T
 
-        epsilon = 5.0
+        epsilon = 15.0
         G = LgV.to(self.device)
         h = (-epsilon * V - LfV).to(self.device)
         P = torch.eye(self.u_dim).to(self.device)
@@ -812,7 +812,7 @@ class CLF():
 
         LfV = grad_V @ fx.T
         LgV = grad_V @ gx.T
-        epsilon = 20.0
+        epsilon = 15.0
         G = LgV.to(self.device)
         h = (-epsilon * V - LfV).to(self.device)
         P = torch.eye(self.u_dim).to(self.device)
@@ -850,7 +850,7 @@ class CLF():
 
         LfV = grad_V @ fx.T
         LgV = grad_V @ gx.T
-        epsilon = 20.0
+        epsilon = 15.0
         G = LgV.to(self.device)
         h = (-epsilon * V - LfV).to(self.device)
         P = torch.eye(self.u_dim).to(self.device)
@@ -892,7 +892,7 @@ class CLF():
         LfV = grad_V @ fx.T
         LgV = grad_V @ gx.T
 
-        epsilon = 20.0
+        epsilon = 15.0
         G = LgV.to(self.device)
         h = (-epsilon * V - LfV).to(self.device)
         P = torch.eye(self.u_dim).to(self.device)
@@ -1050,7 +1050,7 @@ class ObjCLF():
         LfV = grad_V @ fx.T
         LgV = grad_V @ gx.T
 
-        epsilon = 5.0
+        epsilon = 15.0
         G = LgV.to(self.device)
         h = (-epsilon * V - LfV).to(self.device)
         P = torch.eye(self.u_dim).to(self.device)
