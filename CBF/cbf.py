@@ -18,17 +18,19 @@ def qp_solver(P, q, G, h):
 
 
 class CBF():
-    def __init__(self, net: torch.nn.Module, device: torch.device):
+    def __init__(self, net: torch.nn.Module, device: torch.device, gamma: float = 10):
         self.net = net
         self.device = device
         self.x_dim = 3
         self.u_dim = 3
+        self.gamma = gamma
 
     @torch.no_grad()
     def sphere(
         self,
         u: torch.Tensor,
         env,
+        return_b: bool = False,
     ) -> torch.Tensor:
         psm_pos = env._get_robot_state(0)[:3]
         center, radius = env.get_sphere_prop()
@@ -41,7 +43,9 @@ class CBF():
             b = torch.sum((psm_pos - center) ** 2) - radius ** 2
             b.backward()
             grad_b = psm_pos.grad.detach()
-        
+
+        if return_b:
+            return b.item()
         # Reset requires_grad to False before using psm_pos further
         psm_pos.requires_grad_(False)
         
@@ -55,7 +59,7 @@ class CBF():
         Lfb = grad_b @ fx.T  # [1, 1]
         Lgb = grad_b @ gx.T  # [1, 9]
         
-        gamma = 10
+        gamma = self.gamma
         G = -Lgb.to(self.device)
         h = (Lfb + gamma * b).to(self.device)
         P = torch.eye(self.u_dim).to(self.device)
@@ -70,6 +74,7 @@ class CBF():
         self,
         u: torch.Tensor,
         env,
+        return_b: bool = False,
     ) -> torch.Tensor:
         psm_pos = env._get_robot_state(0)[:3]
         cyl_center, cyl_axis, cyl_length, cyl_radius = env.get_cylinder_prop()
@@ -102,6 +107,9 @@ class CBF():
             # torch.max() implements this "OR" logic differentiably.
             # b will only be negative if inside radius AND between planes.
             b = torch.max(torch.stack([b_axial, b_radial]))
+            #add return b(x)
+            if return_b:
+                return b.item()
 
             # --- 5. Compute Gradient ---
             # Backpropagate from the final combined barrier 'b'.
@@ -131,7 +139,7 @@ class CBF():
         Lfb = grad_b @ fx.T  # [1, 1]
         Lgb = grad_b @ gx.T  # [1, 9]
         
-        gamma = 1
+        gamma = self.gamma
         G = -Lgb.to(self.device)
         h = (Lfb + gamma * b).to(self.device)
         P = torch.eye(self.u_dim).to(self.device)

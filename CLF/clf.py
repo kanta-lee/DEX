@@ -398,6 +398,7 @@ class CLF():
         
         if traj_type == 'line':
             # 直线轨迹: Linear interpolation from start to goal
+            _horizon = 2
             positions = np.linspace(start, goal, _horizon)
             yaws = np.linspace(yaw_start, yaw_start, _horizon)  # Keep yaw constant
             
@@ -437,7 +438,7 @@ class CLF():
             # 三角形轨迹: Equilateral triangular closed path returning to start
             # goal is the same as start for triangle trajectory
             goal = start.copy()
-            
+            _horizon = 6
             # Create an equilateral triangle with start as one vertex
             triangle_size = 0.1  # Side length of the equilateral triangle
             
@@ -499,12 +500,15 @@ class CLF():
         self._traj_states[env.__class__.__name__] = state_dict
 
     def _init_linear_state(self, env):
-        """Initialize a simple linear trajectory from start to goal."""
-        _line_horizon = 50  # Number of waypoints for linear trajectory
+        """Initialize a simple linear trajectory from start to goal with periodic gripper opening/closing."""
+        _line_horizon = 40  # Number of waypoints for linear trajectory
+        _gripper_frequency = 20.0  # Number of open/close cycles per trajectory (frequency)
+        _gripper_open_value = 0.5  # Gripper open state (> 0)
+        _gripper_close_value = -0.5  # Gripper closed state (< 0)
 
         start = np.asarray(env._get_robot_state(0)[:3], dtype=np.float32)
-        goal = np.asarray(env.goal, dtype=np.float32) + np.array([0.0, 0.0, -0.06], dtype=np.float32)
-        goal_2 = start + np.array([0.06, 0.0, -0.06], dtype=np.float32)
+        goal = np.asarray(env.goal, dtype=np.float32) + np.array([0.035, 0.0, -0.06], dtype=np.float32)
+        goal_2 = start + np.array([0.045, 0.0, -0.06], dtype=np.float32)
 
         # Linear interpolation from start to goal
         pos = np.linspace(start, goal, _line_horizon)
@@ -516,20 +520,36 @@ class CLF():
         yaws = np.linspace(yaw_start, yaw_goal, _line_horizon)
 
         traj = []
+        gripper_states = []
+        total_steps = _line_horizon * 2  # Total steps for both stages
+        
         #stage 1 : move above the goal
         for k in range(_line_horizon):
             traj.append([pos[k][0], pos[k][1], pos[k][2], np.remainder(yaws[k]+np.pi, 2 * np.pi)-np.pi])
+            # Periodic gripper: use sine wave to alternate between open and close
+            t = k / total_steps  # Normalized time [0, 1]
+            sine_val = np.sin(2 * np.pi * _gripper_frequency * t)
+            # Map sine [-1, 1] to [close, open]
+            gripper_state = _gripper_close_value if sine_val < 0 else _gripper_open_value
+            gripper_states.append(gripper_state)
         
         #stage 2 : move back
         for k in range(_line_horizon):
             traj.append([pos2[k][0], pos2[k][1], pos2[k][2], np.remainder(yaws[k]+np.pi, 2 * np.pi)-np.pi])
+            # Continue periodic gripper for stage 2
+            t = (_line_horizon + k) / total_steps  # Normalized time [0, 1]
+            sine_val = np.sin(2 * np.pi * _gripper_frequency * t)
+            gripper_state = _gripper_close_value if sine_val < 0 else _gripper_open_value
+            gripper_states.append(gripper_state)
+        
         traj = np.asarray(traj, dtype=np.float32)
-
+        gripper_states = np.asarray(gripper_states, dtype=np.float32)
 
         self._traj_states[env.__class__.__name__] = {
             'goal': goal,
             'start': start,
             'traj': traj,
+            'gripper_states': gripper_states,
         }
 
     def _init_linear_state_cbf(self, env):
@@ -623,6 +643,67 @@ class CLF():
             'goal': goal,
             'start': start,
             'traj': traj,
+        }
+
+    def _init_sine_state(self, env):
+        """
+        Initialize a sinusoidal trajectory for NeedlePickWoundCLF.
+        Stage 1: Linear approach from start to a point above the wound.
+        Stage 2: Sinusoidal path — the needle moves forward while oscillating
+                 perpendicular to the main direction of travel.
+        """
+        _line_horizon = 10
+        _sine_horizon = 40
+        _sine_cycles = 2.0        # number of full sine wave cycles
+        _sine_amplitude = 0.08    # amplitude of the sine oscillation (meters)
+        z_bias_1 = 0.03
+
+        start = np.asarray(env._get_robot_state(0)[:3], dtype=np.float32)
+        goal = np.asarray(env.goal, dtype=np.float32)
+        yaw_start = np.asarray(env._get_robot_state(0)[5], dtype=np.float32)
+
+        # --- Stage 1: Linear approach to a point above the wound ---
+        approach_target = goal + np.array([0.0, 0.0, z_bias_1], dtype=np.float32)
+        pos_stage1 = np.linspace(start, approach_target, _line_horizon)
+        yaws_stage1 = np.linspace(yaw_start, yaw_start, _line_horizon)
+
+        traj = []
+        for k in range(_line_horizon):
+            traj.append([pos_stage1[k][0], pos_stage1[k][1], pos_stage1[k][2],
+                         np.remainder(yaws_stage1[k] + np.pi, 2 * np.pi) - np.pi])
+
+        # --- Stage 2: Sinusoidal oscillation path ---
+        # Main travel direction: from approach_target moving forward (along x)
+        travel_vec = np.array([0.2, 0.0, 0.0], dtype=np.float32)  # travel distance
+        sine_end = approach_target + travel_vec
+
+        # Build orthogonal direction for oscillation (perpendicular in XY plane)
+        travel_dir = travel_vec / (np.linalg.norm(travel_vec) + 1e-8)
+        perp_dir = np.array([-travel_dir[1], travel_dir[0], 0.0], dtype=np.float32)
+
+        t_values = np.linspace(0, 1, _sine_horizon)
+        yaws_stage2 = np.linspace(yaw_start, yaw_start, _sine_horizon)
+
+        for k in range(_sine_horizon):
+            t = t_values[k]
+            # Position along the main travel direction
+            base_pos = approach_target + t * travel_vec
+            # Sinusoidal oscillation perpendicular to travel direction
+            sine_offset = _sine_amplitude * np.sin(2 * np.pi * _sine_cycles * t)
+            pos = base_pos + sine_offset * perp_dir
+            traj.append([pos[0], pos[1], pos[2],
+                         np.remainder(yaws_stage2[k] + np.pi, 2 * np.pi) - np.pi])
+
+        # Ensure final point
+        traj.append([sine_end[0], sine_end[1], sine_end[2],
+                     np.remainder(yaw_start + np.pi, 2 * np.pi) - np.pi])
+        traj = np.asarray(traj, dtype=np.float32)
+
+        self._traj_states[env.__class__.__name__] = {
+            'goal': goal,
+            'start': start,
+            'traj': traj,
+            'traj_type': 'sine',
         }
 
     def _init_waypoint_state(self, env):
@@ -722,7 +803,10 @@ class CLF():
         key = env.__class__.__name__
         if key not in self._traj_states:
             if key == 'NeedlePickWoundCLF':
-                self._init_spiral_state(env)
+                if self.traj_type == 'sine':
+                    self._init_sine_state(env)
+                else:
+                    self._init_spiral_state(env)
             elif key == 'NeedlePickLungCLF':
                 self._init_linear_state(env)
             elif key == 'NeedlePickTrajectoryCLF':
@@ -831,6 +915,7 @@ class CLF():
         """Linear trajectory tracking without needle grasping check."""
         p_ref = self._get_reference(env)
         psm_pos_ori = env._get_robot_state(0)[:6]
+        gripper_state = self.get_current_gripper_state(env)  # Get gripper state if available
 
         p_ref_t = torch.from_numpy(p_ref).float().unsqueeze(0).to(self.device)
         psm_pos_ori_t = torch.from_numpy(psm_pos_ori).float().unsqueeze(0).to(self.device)
@@ -862,7 +947,7 @@ class CLF():
         except Exception:
             modified_u = u
 
-        return modified_u, p_ref
+        return modified_u, p_ref, gripper_state
 
     @torch.no_grad()
     def traj_tracking(self, u, env):
@@ -1063,3 +1148,4 @@ class ObjCLF():
             modified_u = u
 
         return modified_u, p_ref
+ 
