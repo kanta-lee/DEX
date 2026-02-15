@@ -31,6 +31,7 @@ from NeuralODE.node import NeuralODE
 from CBF.cbf import CBF
 from CLF.clf import CLF, PositionCLF
 import time
+from torchdiffeq import odeint
 
 class Sampler:
     """Collects rollouts from the environment using the given agent."""
@@ -49,6 +50,7 @@ class Sampler:
         self.global_min_safe_margins = []
         self.global_inference_times = []
         self.global_max_node_pred_errors = []  # Store max node_pred_error for each episode
+        self.global_max_state_pred_errors = []  # Store max state_pred_error for each episode
 
         # ===============================================================
         #                 Integrate Neural ODE, CBF and CLF
@@ -83,8 +85,8 @@ class Sampler:
         # Initialize Neural ODE
         # the neural ode has dims [x_dim, 64, x_dim + x_dim * u_dim]
         # position only: x_dim=3, u_dim=3, output=3+3*3=12
-        # self.node = NeuralODE([3, 64, 12]).to(self.device)
-        self.node = NeuralODE([3, 64, 64, 12]).to(self.device)
+        self.node = NeuralODE([3, 64, 12]).to(self.device)
+        # self.node = NeuralODE([3, 64, 64, 12]).to(self.device)
 
 
         # self.node = NeuralODE([3, 64, 12]).to(self.device)
@@ -157,6 +159,7 @@ class Sampler:
         inference_time = 0.0
         safe_margin = float('-inf')
         max_episode_node_pred_error = 0.0  # Track max node_pred_error for this episode
+        max_episode_state_pred_error = 0.0  # Track max state_pred_error for this episode
         
         # Determine path type
         # path_type = "CLF" if self.cfg.use_dclf else "CBF" if self.cfg.use_dcbf else "NONE"
@@ -288,7 +291,8 @@ class Sampler:
                         modified_action = self.cbf.cylinder(u, env)
                     else:
                         raise ValueError("Unsupported environment for CBF, such as no constraints defined for this env.")
-                    
+                    # speed_scale = 0.1  # <--- 修改这里：0.5 表示 50% 的速度，0.2 表示 20%
+                    # modified_action = modified_action * speed_scale
                     # Check if CBF actually modified the action
                     modified_action_np = modified_action.cpu().numpy()
                     if not np.allclose(u_original, modified_action_np, atol=1e-4):
@@ -324,12 +328,18 @@ class Sampler:
                     u = torch.from_numpy(u_for_node).float().unsqueeze(0).to(self.device)
                     self.node.u = u
                     dt = 0.1
-                    dxdt = self.node(torch.tensor(0.0, device=self.device), x)
-                    pred_next_pos = x + dt * dxdt
                     true_next_pos = torch.from_numpy(next_pos).float().unsqueeze(0).to(self.device)
-                    node_pred_error = torch.mean(torch.abs(true_next_pos - pred_next_pos), dim=-1).item()
-                    # Update max error for this episode
+                    true_dxdt = (true_next_pos - x) / dt
+
+                    t_step_vec = torch.tensor([0.0, dt], device=self.device)
+                    pred = odeint(self.node, x, t_step_vec, method='dopri8')
+                    pred_next_pos = pred[-1, :, :]
+                    state_pred_error = torch.mean(torch.abs(true_next_pos - pred_next_pos), dim=-1).item()
+
+                    pred_dxdt = self.node(torch.tensor(0.0, device=self.device), x)
+                    node_pred_error = torch.mean(torch.abs(true_dxdt - pred_dxdt), dim=-1).item()
                     max_episode_node_pred_error = max(max_episode_node_pred_error, node_pred_error)
+                    max_episode_state_pred_error = max(max_episode_state_pred_error, state_pred_error)
 
             episode.append(AttrDict(
                 reward=reward,
@@ -337,6 +347,7 @@ class Sampler:
                 info=info,
                 safe_margin=safe_margin,
                 inference_time=inference_time,
+                state_pred_error=state_pred_error,
                 node_pred_error=node_pred_error
             ))
             self._episode_cache.store_transition(obs, action, done)
@@ -467,6 +478,14 @@ class Sampler:
         else:
             print('Episode Max Node Pred Error: N/A (not computed)')
 
+        all_state_pred_errors = [e.state_pred_error for e in episode if e.state_pred_error is not None and e.state_pred_error > 0]
+        if all_state_pred_errors:
+            self.global_max_state_pred_errors.append(max_episode_state_pred_error)
+            print(f'Episode {ep} Max State Pred Error: {max_episode_state_pred_error:.6f}')
+            print(f'Mean of Max State Pred Errors (All Episodes): {np.mean(self.global_max_state_pred_errors):.6f}')
+        else:
+            print('Episode Max State Pred Error: N/A (not computed)')
+
         if isinstance(self._obs, dict):
             last_dist = np.linalg.norm(self._obs['achieved_goal'] - self._obs['desired_goal'])
             print(f'last-step goal distance: {last_dist:.6f}')
@@ -494,7 +513,7 @@ class Sampler:
             np.save(action_filename, actions)
             np.save(states_filename, states)
             print("Images, states and actions are saved at", base_path)
-        # # Plot safe_margin per step for this episode
+        # Plot safe_margin per step for this episode
         # if all_margins:
         #     # 1. 准备数据和元信息
         #     steps = np.arange(len(all_margins))
@@ -705,7 +724,7 @@ class Sampler:
         #         ax.view_init(elev=20, azim=10)
         #         ax.dist = 11  # zoom out slightly so the 3D plot doesn't overlap legend
 
-        #         ax.set_title(r'$\bf{Safety-Critical\ Trajectory\ Generation}$', fontsize=20, pad=15)
+        #         ax.set_title(r'$\bf{3D\ Trajectory\ Visualization}$', fontsize=20, pad=15)
         #         ax.legend(loc='upper left', fontsize=14, framealpha=0.8,
         #                   bbox_to_anchor=(-0.02, 1.02))
 
