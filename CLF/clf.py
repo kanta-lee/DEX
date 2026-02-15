@@ -501,17 +501,20 @@ class CLF():
 
     def _init_linear_state(self, env):
         """Initialize a simple linear trajectory from start to goal with periodic gripper opening/closing."""
-        _line_horizon = 40  # Number of waypoints for linear trajectory
+        _line_horizon = 2  # Number of waypoints for linear trajectory (can be small, gripper is independent)
         _gripper_frequency = 20.0  # Number of open/close cycles per trajectory (frequency)
         _gripper_open_value = 0.5  # Gripper open state (> 0)
         _gripper_close_value = -0.5  # Gripper closed state (< 0)
+        _expected_total_steps = 100  # Expected total execution steps for gripper state generation
 
         start = np.asarray(env._get_robot_state(0)[:3], dtype=np.float32)
-        goal = np.asarray(env.goal, dtype=np.float32) + np.array([0.035, 0.0, -0.06], dtype=np.float32)
-        goal_2 = start + np.array([0.045, 0.0, -0.06], dtype=np.float32)
+        goal = start + np.array([0.0, 0.0, -0.05], dtype=np.float32)
+        goal1 = np.asarray(env.goal, dtype=np.float32) + np.array([-0.045, 0.0, -0.12], dtype=np.float32)
+        goal_2 = start + np.array([0.055, 0.0, -0.12], dtype=np.float32)
 
-        # Linear interpolation from start to goal
+        # Linear interpolation from start to goal (only 2 points for trajectory)
         pos = np.linspace(start, goal, _line_horizon)
+        pos1 = np.linspace(start, goal1, _line_horizon)
         pos2 = np.linspace(goal, goal_2, _line_horizon)
 
         # Keep yaw constant (or interpolate if needed)
@@ -519,26 +522,24 @@ class CLF():
         yaw_goal = yaw_start  # Keep same yaw, or set to desired value
         yaws = np.linspace(yaw_start, yaw_goal, _line_horizon)
 
+        # Generate trajectory points using actual interpolated positions
         traj = []
-        gripper_states = []
-        total_steps = _line_horizon * 2  # Total steps for both stages
-        
-        #stage 1 : move above the goal
         for k in range(_line_horizon):
             traj.append([pos[k][0], pos[k][1], pos[k][2], np.remainder(yaws[k]+np.pi, 2 * np.pi)-np.pi])
-            # Periodic gripper: use sine wave to alternate between open and close
-            t = k / total_steps  # Normalized time [0, 1]
-            sine_val = np.sin(2 * np.pi * _gripper_frequency * t)
-            # Map sine [-1, 1] to [close, open]
-            gripper_state = _gripper_close_value if sine_val < 0 else _gripper_open_value
-            gripper_states.append(gripper_state)
-        
-        #stage 2 : move back
+        for k in range(_line_horizon):
+            traj.append([pos1[k][0], pos1[k][1], pos1[k][2], np.remainder(yaws[k]+np.pi, 2 * np.pi)-np.pi])
         for k in range(_line_horizon):
             traj.append([pos2[k][0], pos2[k][1], pos2[k][2], np.remainder(yaws[k]+np.pi, 2 * np.pi)-np.pi])
-            # Continue periodic gripper for stage 2
-            t = (_line_horizon + k) / total_steps  # Normalized time [0, 1]
+        
+        # Generate gripper states for the expected total steps, maintaining gripper frequency
+        # This allows gripper to work independently of trajectory waypoint progression
+        gripper_states = []
+        for step in range(_expected_total_steps):
+            # Normalized time [0, 1] based on expected total steps
+            t = step / _expected_total_steps
+            # Periodic gripper: use sine wave to alternate between open and close
             sine_val = np.sin(2 * np.pi * _gripper_frequency * t)
+            # Map sine [-1, 1] to [close, open]
             gripper_state = _gripper_close_value if sine_val < 0 else _gripper_open_value
             gripper_states.append(gripper_state)
         
